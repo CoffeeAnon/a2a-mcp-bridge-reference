@@ -84,7 +84,7 @@ class TranslationError(ValueError):
 class A2aAuthRequiredEvent:
     """A2A ``task_status_update`` event with state=auth_required.
 
-    Shape matches the sequence diagram in `docs/architecture.md` §"A2A surface" and the A2A
+    Shape matches the sequence diagram in `docs/architecture.md` "A2A surface" and the A2A
     protocol spec. Constructed by the agent's executor when its dispatch
     hits a HITL-gated tool.
     """

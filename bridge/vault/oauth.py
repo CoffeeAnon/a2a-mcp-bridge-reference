@@ -28,7 +28,7 @@ Differences from Tier 1:
     runs them in one process for simplicity.
 
 The threat model the user buys with Tier 2 is documented in the
-architecture page §"Threat model": agent-process compromise no longer
+architecture page "Threat model": agent-process compromise no longer
 yields a usable destructive credential, because no destructive
 credential exists at rest in the agent.
 """

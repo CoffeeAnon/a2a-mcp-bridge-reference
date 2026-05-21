@@ -1,7 +1,7 @@
 """Separated Resource Server with independent JWT validation.
 
-In the three-layer architecture documented in `docs/architecture.md` (rationale page §"How the bridge
-weaves the tiers together"; architecture page §"Component map"), the
+In the three-layer architecture documented in `docs/architecture.md` (rationale page "How the bridge
+weaves the tiers together"; architecture page "Component map"), the
 Vault mints credentials and the Resource Server validates them
 *independently* — same JWT, separate validation path, separate state.
 

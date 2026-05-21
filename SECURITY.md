@@ -4,7 +4,7 @@
 
 This is a reference implementation. If you find a *pattern-level* flaw - i.e. the architecture as documented (the Vault contract, three-layer enforcement, canonical-bytes shape, A2A↔MCP translation) teaches something incorrect or unsafe - please open an issue. Pattern-level corrections are exactly what the repo exists to attract.
 
-For *substrate-level* findings (the consent server lacks CSRF tokens, the token store has a race, the audit log stores PII in plaintext), please cross-reference §"Intentional Omissions" below before filing. Most of these are documented non-goals; an issue is still welcome if you believe one is mis-classified.
+For *substrate-level* findings (the consent server lacks CSRF tokens, the token store has a race, the audit log stores PII in plaintext), please cross-reference "Intentional Omissions" below before filing. Most of these are documented non-goals; an issue is still welcome if you believe one is mis-classified.
 
 There is no production deployment to coordinate disclosure with. Public issues are appropriate.
 
@@ -27,14 +27,14 @@ These belong to the deployment substrate, not the architecture being taught. The
 
 ### Architectural gaps the bundled demo does not close
 
-These are properties the architectural claim *does* commit to, but the bundled demo's substrate stops short of delivering. A production port must close each. They are also listed in the README under §"Known production gaps".
+These are properties the architectural claim *does* commit to, but the bundled demo's substrate stops short of delivering. A production port must close each. They are also listed in the README under "Known production gaps".
 
 - **HS256 → RS256/ES256 + JWKS.** Symmetric secret co-located between Vault and RS in the demo.
 - **Server-side signer co-location.** `bridge.consent.demo_signer` holds the user signing key. Production moves signing client-side (WebAuthn / Passkey) and validates the submitted payload against the stored `ProposedAction`.
 - **In-memory consumed-jti set.** Vault/RS restart inside the JWT TTL discards the replay-tracking record.
 - **Re-mint within signed-payload TTL.** Single-use is enforced per-jti (at consume), not per-signed-payload (at mint).
 - ~~**MCP scope enforcement.** `bridge/mcp/auth.py` is authentication-only.~~ *Closed:* `Dispatcher.execute` enforces `ToolSpec.required_scopes` against the caller's bearer scopes before HITL routing. See `bridge/core/dispatcher.py` and `tests/e2e/test_scope_enforcement.py`. Any non-MCP surface that bypasses the dispatcher must apply the same check itself.
-- ~~**Binding-message tampering.** The human-readable consent summary is not in the canonical bytes.~~ *Closed:* `binding_message` is now a required field of the canonical-bytes contract (CANONICAL.md §`binding_message`). A bridge that renders one summary and signs different bytes produces a signature the Vault rejects. See `tests/e2e/test_three_layer_enforcement.py::test_vault_rejects_binding_message_swap`.
+- ~~**Binding-message tampering.** The human-readable consent summary is not in the canonical bytes.~~ *Closed:* `binding_message` is now a required field of the canonical-bytes contract (CANONICAL.md `binding_message`). A bridge that renders one summary and signs different bytes produces a signature the Vault rejects. See `tests/e2e/test_three_layer_enforcement.py::test_vault_rejects_binding_message_swap`.
 - **MCP elicitation emission.** Not bundled in `bridge/mcp/server.py`; demonstrated as building blocks in `tests/e2e/test_mcp_hitl_building_blocks.py`.
 
 ## What the reference *does* defend, structurally

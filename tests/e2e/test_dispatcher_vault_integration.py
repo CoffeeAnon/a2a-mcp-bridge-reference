@@ -145,7 +145,7 @@ def test_tier2_attacker_without_user_secret_cannot_forge_a_new_signature(seeded_
     and the bridge/agent process never holds it. In the **HS256 demo
     configuration** the bridge process holds *both* secrets and an
     attacker with code execution there has both; that case is NOT
-    what this test covers. See README §"Limitations" and the
+    what this test covers. See README "Limitations and non-goals" and the
     docs/architecture.md threat-model row "Compromised agent process"
     for the demo-mode caveat.
 
@@ -214,7 +214,7 @@ def test_tier2_compromised_agent_can_remint_same_action_within_ttl(seeded_client
     consent per *execution*". A production deployment that needs the
     stronger property must track consumed signed-payload signatures at
     mint time (a small additional set on the Vault). See the Vault
-    docstring and the rationale page §"Failure modes worth designing for."
+    docstring and the rationale page "Failure modes worth designing for."
     """
     client, promised_id, _ = seeded_client
     vault = OAuthVault(

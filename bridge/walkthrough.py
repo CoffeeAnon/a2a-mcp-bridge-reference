@@ -106,7 +106,7 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
 
     print(f"{_BOLD}A2A → Vault → RS walkthrough (Tier {tier}){_RESET}")
     print(f"{_DIM}A reference simulation of the sequence diagram in "
-          f"`docs/architecture.md` §A2A flow.{_RESET}")
+          f"`docs/architecture.md` "A2A" flow.{_RESET}")
 
     # Set up shared infrastructure.
     store = InMemoryTaskStore()
@@ -218,7 +218,7 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
           "reference's `demo_sign_as_user` stand-in. In production the user_signing_"
           "secret lives on the human's MCP host (WebAuthn-bound, hardware-backed) "
           "and the bridge process NEVER holds it. See "
-          "docs/architecture.md §Threat model and the docstring on "
+          "docs/architecture.md "Threat" model and the docstring on "
           "`bridge.consent.demo_signer`.")
     _print_envelope("signed payload (sent back to bridge)", {
         "command": signed.command,

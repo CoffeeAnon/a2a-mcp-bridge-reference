@@ -5,7 +5,7 @@ consent server, the Vault, and the RS *by hand* - it does NOT exercise
 the MCP server's tools/call → elicitation/create wire. The
 server-side MCP elicitation emission (the natural next step beyond
 the current ``bridge.mcp.server``) is not bundled in the reference;
-see README §"Limitations" - *"MCP elicitation emission is not bundled"*.
+see README "Limitations and non-goals" - *"MCP elicitation emission is not bundled"*.
 
 What this test proves:
 

@@ -13,7 +13,7 @@ MCP HTTP surface for the task-tracker reference agent. Exposes the read-tool sub
 
 ## Read-only by design
 
-`bridge/mcp/tools.py` filters `TOOL_SPECS` through an explicit allowlist *and* a defense-in-depth filter that excludes any tool with `requires_approval=True` or `in_process=True`. The MCP surface in the reference therefore never exposes `delete_task` (HITL-gated). Adding write tools to the MCP surface requires extending the allowlist and wiring the server-side emission of an MCP `elicitation/create` request — see `docs/architecture.md` §"HITL flow via MCP" for the design and `tests/e2e/test_mcp_hitl_roundtrip.py` for the building blocks composed end-to-end.
+`bridge/mcp/tools.py` filters `TOOL_SPECS` through an explicit allowlist *and* a defense-in-depth filter that excludes any tool with `requires_approval=True` or `in_process=True`. The MCP surface in the reference therefore never exposes `delete_task` (HITL-gated). Adding write tools to the MCP surface requires extending the allowlist and wiring the server-side emission of an MCP `elicitation/create` request — see `docs/architecture.md` "HITL flow via MCP" for the design and `tests/e2e/test_mcp_hitl_roundtrip.py` for the building blocks composed end-to-end.
 
 ## Tests
 
