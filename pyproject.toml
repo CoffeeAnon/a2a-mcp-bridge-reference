@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a2a-mcp-bridge-reference"
+version = "0.1.0"
+description = "Reference implementation of a stateful, HITL-aware A2A↔MCP bridge with parameter-bound authorization."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "starlette>=0.37",
+    "uvicorn>=0.30",
+    "python-dotenv>=1.0",
+    "tiktoken>=0.7",
+]
+
+[project.scripts]
+bridge = "bridge.cli:main"
+
+[project.optional-dependencies]
+agent = [
+    "langgraph>=0.2,<0.4",
+    "langchain-core>=0.3,<0.4",
+    "langchain-openai>=0.2,<0.4",
+    "langgraph-checkpoint-sqlite>=2.0,<3.0",
+    "a2a-sdk[http-server]>=0.3,<0.4",
+    "mcp>=1.0",
+]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-httpx>=0.30",
+    "a2a-sdk[http]>=0.3,<0.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bridge*"]
+
+[tool.setuptools.package-data]
+"bridge.agent" = ["prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
