@@ -10,7 +10,7 @@ and surface HITL approvals through MCP elicitation; see the architecture page.
 """
 from __future__ import annotations
 
-from bridge.agent.tools import TOOL_SPECS, ToolSpec
+from bridge.tools import TOOL_SPECS, ToolSpec
 
 MCP_V1_ALLOWLIST: frozenset[str] = frozenset({
     "list_tasks",

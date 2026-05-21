@@ -143,3 +143,40 @@ def test_arg_drift_changes_canonical_bytes():
     drifted_input = {**_FIX_1_INPUT, "args": {"task_id": "t-43"}}
     drifted = canonical_authorization_bytes(**drifted_input)
     assert base != drifted
+
+
+# ── Fixture set 6: non-ASCII in approver_id (ensure_ascii=True locked in) ──
+
+
+_FIX_6_INPUT = dict(
+    command="delete-task",
+    args={"task_id": "t-42"},
+    rar_type="tasktracker_task_action",
+    exp=1779315522,
+    approver_id="alïce@example.com",  # contains U+00EF
+)
+# What the reference produces. A JS signer that emits raw UTF-8 for `ï`
+# (default JSON.stringify behaviour) will NOT produce these bytes.
+_FIX_6_CANONICAL = (
+    b'{"approver_id":"al\\u00efce@example.com",'
+    b'"args":{"task_id":"t-42"},'
+    b'"cmd":"delete-task",'
+    b'"exp":1779315522,'
+    b'"rar_type":"tasktracker_task_action"}'
+)
+
+
+def test_fixture_6_nonascii_approver_id_escapes_to_uXXXX():
+    """The canonical form escapes non-ASCII as \\uXXXX (ensure_ascii=True).
+
+    This is load-bearing for cross-language signers: a JS signer that
+    emits the raw UTF-8 bytes for `ï` will produce different canonical
+    bytes and the signature will mismatch. See CANONICAL.md
+    'Non-ASCII strings' section.
+    """
+    actual = canonical_authorization_bytes(**_FIX_6_INPUT)
+    assert actual == _FIX_6_CANONICAL
+    # Specifically: the bytes contain the ASCII escape, not the UTF-8 form.
+    assert b"\\u00ef" in actual
+    assert b"\xc3\xaf" not in actual  # the raw UTF-8 encoding of ï
+

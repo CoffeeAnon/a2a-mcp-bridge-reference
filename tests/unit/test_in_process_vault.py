@@ -20,7 +20,7 @@ from bridge.vault import (
 )
 
 
-SECRET = "test-shared-secret"
+SECRET = "test-shared-secret-16bytes-min"
 RAR_TYPE = "tasktracker_task_action"
 
 
@@ -52,7 +52,7 @@ def test_mint_then_consume_happy_path(vault):
 
 
 def test_mint_rejects_bad_signature(vault):
-    signed = _signed(secret="wrong-secret")
+    signed = _signed(secret="wrong-secret-16bytes-minimum")
     with pytest.raises(SignatureMismatch):
         vault.mint(signed)
 

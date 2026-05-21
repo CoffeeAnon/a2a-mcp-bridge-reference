@@ -15,8 +15,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from dataclasses import asdict, dataclass, field
-from typing import Iterable
+from dataclasses import asdict, dataclass
 
 
 class ApiError(Exception):

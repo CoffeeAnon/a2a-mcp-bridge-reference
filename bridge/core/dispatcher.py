@@ -1,6 +1,6 @@
 """Command dispatcher with HITL gate.
 
-Pure logic — no printing, no exit codes. Used by both the agent's in-process
+Pure logic: no printing, no exit codes. Used by both the agent's in-process
 invoker and any CLI wrapper that wants to call commands directly.
 
 The HITL gate is the single load-bearing primitive: when a command's class
@@ -17,14 +17,14 @@ credential. Validation can happen in one of two places:
     ``(command, args, credential)`` to ``ResourceServer.execute``, which
     does its own JWT verify + binding check + single-use enforcement
     against the RS's own state, then executes. This is the deployment
-    shape the wiki's "three independent enforcement layers" claim
+    shape the "three independent enforcement layers" claim
     requires.
 
 A ``Dispatcher`` is constructed with exactly one of ``vault=`` or
 ``resource_server=``; passing neither is a programming error.
 """
 from dataclasses import dataclass
-from typing import Any, Union
+from typing import Any
 
 from bridge.core.client import ApiError, BridgeClient
 from bridge.core.registry import REGISTRY
@@ -32,7 +32,7 @@ from bridge.rs import JwtResourceServer, RsError, RsRejected, RsSuccess
 from bridge.vault import Vault, VaultError
 
 
-# ── Outcome types — the structured return from Dispatcher.execute() ──────────
+# ── Outcome types: the structured return from Dispatcher.execute() ──────────
 
 @dataclass(frozen=True)
 class CommandSuccess:
@@ -52,9 +52,9 @@ class ApprovalRequired:
     """Returned when a HITL-gated command was attempted without a valid credential.
 
     ``reason`` is populated with the Vault exception's class name when a
-    Vault-backed dispatcher refused a presented credential — e.g.
+    Vault-backed dispatcher refused a presented credential (for example,
     ``"CredentialDrift"``, ``"CredentialReplay"``, ``"CredentialExpired"``,
-    ``"SignatureMismatch"``. Callers should treat ``reason`` as an audit-
+    ``"SignatureMismatch"``). Callers should treat ``reason`` as an audit-
     attribution hint, not as part of the security contract (the contract
     is "the command did not execute"). ``reason`` is ``None`` when no
     credential was presented at all.
@@ -64,7 +64,7 @@ class ApprovalRequired:
     reason: str | None = None
 
 
-CommandOutcome = Union[CommandSuccess, CommandError, ApprovalRequired]
+CommandOutcome = CommandSuccess | CommandError | ApprovalRequired
 
 
 _RESERVED_META_KEYS = {"count", "status", "command"}
@@ -78,7 +78,7 @@ class Dispatcher:
     Constructor parameters:
       client: resource-server client used by the Vault-backed path
               (defaults to ``InMemoryTaskStore``). Ignored when a
-              separated ``resource_server`` is provided — the RS holds
+              separated ``resource_server`` is provided - the RS holds
               its own client.
       vault:  ``Vault`` implementation. Co-located mint + consume +
               execute in one trust domain.
@@ -119,8 +119,9 @@ class Dispatcher:
 
         collision = _RESERVED_META_KEYS & kwargs.keys()
         if collision:
-            raise RuntimeError(
-                f"Command kwargs must not use reserved meta keys: {collision}"
+            raise ValueError(
+                f"Command kwargs collide with reserved meta keys {sorted(collision)}; "
+                f"rename in your tool spec"
             )
 
         if cmd_cls.hitl:

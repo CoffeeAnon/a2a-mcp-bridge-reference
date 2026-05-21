@@ -50,7 +50,10 @@ def demo_sign_as_user(
     )
     return {
         "command": signed.command,
-        "args": signed.args,
+        # Convert to a plain dict for the wire — args may have been a
+        # MappingProxyType when sourced from a ProposedAction. The wire
+        # format is JSON; immutability was an in-process binding property.
+        "args": dict(signed.args),
         "rar_type": signed.rar_type,
         "exp": signed.exp,
         "approver_id": signed.approver_id,

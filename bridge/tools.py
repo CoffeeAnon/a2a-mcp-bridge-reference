@@ -1,13 +1,13 @@
-"""Tool registry — single source of truth for agent tool metadata.
+"""Tool registry: single source of truth for agent tool metadata.
 
 Each ToolSpec captures:
-- `name` — the name the LLM sees in function-calling (snake_case)
-- `description` — the LLM-facing description (used by `tools/list` and prompt context)
-- `parameters` — JSON Schema exposed to the LLM
-- `cli_name` — corresponding CLI subcommand (kebab-case); None for in-process tools
-- `requires_approval` — True if the tool hits the HITL gate
-- `in_process` — True if the tool is dispatched inside the graph (not via subprocess)
-- `rar_type` — RFC 9396 `authorization_details.type` string used by the Tier-1 OAuth
+- `name`: the name the LLM sees in function-calling (snake_case)
+- `description`: the LLM-facing description (used by `tools/list` and prompt context)
+- `parameters`: JSON Schema exposed to the LLM
+- `cli_name`: corresponding CLI subcommand (kebab-case); None for in-process tools
+- `requires_approval`: True if the tool hits the HITL gate
+- `in_process`: True if the tool is dispatched inside the graph (not via subprocess)
+- `rar_type`: RFC 9396 `authorization_details.type` string used by the Tier-1 OAuth
   deployment to construct the consent payload. Only meaningful when
   `requires_approval=True`.
 
@@ -90,7 +90,7 @@ TOOL_SPECS: list[ToolSpec] = [
         requires_approval=True,
         rar_type="tasktracker_task_action",
         description=(
-            "Delete a task by ID. Destructive — requires human approval before "
+            "Delete a task by ID. Destructive; requires human approval before "
             "execution. The approval is bound to this exact task_id; any "
             "attempt to delete a different task requires a new approval."
         ),
@@ -104,18 +104,3 @@ TOOL_SPECS: list[ToolSpec] = [
 
 
 SPECS_BY_NAME: dict[str, ToolSpec] = {s.name: s for s in TOOL_SPECS}
-
-
-def openai_schemas() -> list[dict]:
-    """Return the OpenAI function-calling schema for every tool in the registry."""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": s.name,
-                "description": s.description,
-                "parameters": s.parameters,
-            },
-        }
-        for s in TOOL_SPECS
-    ]

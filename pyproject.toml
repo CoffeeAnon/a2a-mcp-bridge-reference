@@ -7,39 +7,34 @@ name = "a2a-mcp-bridge-reference"
 version = "0.1.0"
 description = "Reference implementation of a stateful, HITL-aware A2A↔MCP bridge with parameter-bound authorization."
 requires-python = ">=3.11"
-dependencies = [
-    "httpx>=0.27",
-    "starlette>=0.37",
-    "uvicorn>=0.30",
-    "python-dotenv>=1.0",
-    "tiktoken>=0.7",
-]
+# Core: stdlib-only.
+# The Vault, RS, dispatcher, commands, CLI, and walkthrough require
+# zero third-party packages.
+dependencies = []
 
 [project.scripts]
 bridge = "bridge.cli:main"
 
 [project.optional-dependencies]
-agent = [
-    "langgraph>=0.2,<0.4",
-    "langchain-core>=0.3,<0.4",
-    "langchain-openai>=0.2,<0.4",
-    "langgraph-checkpoint-sqlite>=2.0,<3.0",
-    "a2a-sdk[http-server]>=0.3,<0.4",
+# MCP HTTP surface (bridge.mcp.*) and URL-mode consent server
+# (bridge.consent.url_mode). Pulls in Starlette + uvicorn + the
+# Anthropic MCP SDK. Required if you want to expose the protocol
+# endpoints; the CLI demos run without it.
+mcp = [
     "mcp>=1.0",
+    "starlette>=0.37",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",   # required by Starlette's form parsing in bridge.consent.url_mode
 ]
+# Test runner.
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
-    "pytest-httpx>=0.30",
-    "a2a-sdk[http]>=0.3,<0.4",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["bridge*"]
-
-[tool.setuptools.package-data]
-"bridge.agent" = ["prompts/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

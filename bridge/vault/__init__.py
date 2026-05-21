@@ -4,8 +4,8 @@ Two implementations of the same ``Vault`` Protocol:
   - ``InProcessVault``: Tier 1, in-process HMAC verifier
   - ``OAuthVault``: Tier 2, JWT-minting authorization server (HS256)
 
-See ``decisions/a2a-mcp-bridge-design-rationale`` for the three-tier
-graduation and ``decisions/a2a-mcp-bridge-architecture`` for component flows.
+See ``docs/rationale.md`` for the three-tier
+graduation and ``docs/architecture.md`` for component flows.
 """
 from bridge.vault.in_process import InProcessVault, sign_authorization_details
 from bridge.vault.interface import (

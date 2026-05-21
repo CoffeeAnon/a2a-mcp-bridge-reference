@@ -4,7 +4,7 @@ The publishable property in test form. The dispatcher refuses to execute a
 drifted command, and the underlying RS-equivalent (the in-memory store)
 is never reached. Replayed credentials are rejected.
 
-Exercised via Tier 1 (InProcessVault) — the Vault-backed integration tests
+Exercised via Tier 1 (InProcessVault); the Vault-backed integration tests
 cover Tier 2 separately. The point of this file is the *zero-unexpected-
 RS-calls* property: a wrapped client demonstrates that drift attempts
 never reach the underlying executor.
@@ -16,7 +16,7 @@ from bridge.core.dispatcher import ApprovalRequired, CommandSuccess, Dispatcher
 from bridge.vault import InProcessVault, sign_authorization_details
 
 
-USER_SECRET = "test-user-secret"
+USER_SECRET = "test-user-secret-16bytes-min"
 RAR_TYPE = "tasktracker_task_action"
 
 
@@ -24,8 +24,8 @@ RAR_TYPE = "tasktracker_task_action"
 def two_tasks_setup():
     """Fresh client + vault + dispatcher with two pre-seeded tasks."""
     client = InMemoryTaskStore()
-    promised = client.create(title="Promised — approved for deletion")
-    drifted = client.create(title="Drifted — must survive any drift attempt")
+    promised = client.create(title="Promised: approved for deletion")
+    drifted = client.create(title="Drifted: must survive any drift attempt")
     vault = InProcessVault(secret=USER_SECRET, expected_rar_type=RAR_TYPE)
     dispatcher = Dispatcher(client=client, vault=vault)
     return client, vault, dispatcher, promised["task_id"], drifted["task_id"]
@@ -71,7 +71,7 @@ def test_zero_unexpected_rs_calls_property(two_tasks_setup):
     """The 'zero unexpected RS calls' framing.
 
     Wrap the underlying store and count delete calls. After a drift
-    attempt, the count must be 0 — the dispatcher must refuse BEFORE
+    attempt, the count must be 0; the dispatcher must refuse BEFORE
     reaching the executor.
     """
     client, vault, dispatcher, promised_id, drifted_id = two_tasks_setup
@@ -99,8 +99,8 @@ def test_zero_unexpected_rs_calls_property(two_tasks_setup):
 
 
 def test_dispatcher_requires_vault_or_rs(two_tasks_setup):
-    """``Dispatcher()`` with neither a vault nor an RS is a programming error
-    — replaces the old silent fallback to a no-single-use HMAC path."""
+    """``Dispatcher()`` with neither a vault nor an RS is a programming error;
+    replaces the old silent fallback to a no-single-use HMAC path."""
     client, _, _, _, _ = two_tasks_setup
     with pytest.raises(ValueError, match="vault.*resource_server"):
         Dispatcher(client=client)

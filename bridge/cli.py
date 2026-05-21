@@ -1,19 +1,23 @@
 """Functional-test CLI for the A2A↔MCP bridge reference.
 
-Stdlib argparse only — no typer/click dependency. Each demo subcommand
+Stdlib argparse only, no typer/click dependency. Each demo subcommand
 walks through one end-to-end scenario, prints the steps with a stable
 ``[OK]`` / ``[REJECTED]`` / ``[ERROR]`` envelope, and exits with a
-non-zero code on any unexpected outcome — so the CLI doubles as a
+non-zero code on any unexpected outcome, so the CLI doubles as a
 smoke-test runner.
 
 Invocations::
 
-    python -m bridge.cli demo tier1
-    python -m bridge.cli demo tier2
-    python -m bridge.cli demo drift     [--tier 1|2]
-    python -m bridge.cli demo replay    [--tier 1|2]
-    python -m bridge.cli demo unforgeable
-    python -m bridge.cli demo all       # runs every scenario above
+    python -m bridge.cli demo tier1            # Pattern-2 happy path on Tier 1
+    python -m bridge.cli demo tier2            # Pattern-2 happy path on Tier 2
+    python -m bridge.cli demo drift [--tier 1|2]    # parameter-drift rejected
+    python -m bridge.cli demo replay [--tier 1|2]   # credential-replay rejected
+    python -m bridge.cli demo key-isolation    # cross-Vault key independence
+    python -m bridge.cli demo translation      # Pattern-1 A2A↔MCP round-trip
+    python -m bridge.cli demo all              # run every scenario, print summary
+
+    python -m bridge.cli walkthrough --tier 2          # narrate the architecture-doc sequence
+    python -m bridge.cli walkthrough --tier 2 --pause  # step-by-step
 
 Exit codes::
 
@@ -25,13 +29,19 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Callable
+from collections.abc import Callable
 
 from bridge.core.client import InMemoryTaskStore
 from bridge.core.dispatcher import (
     ApprovalRequired,
     CommandSuccess,
     Dispatcher,
+)
+from bridge.translation import (
+    A2aAuthRequiredEvent,
+    McpElicitationResponse,
+    a2a_auth_required_to_mcp_elicitation,
+    mcp_elicitation_response_to_a2a_resume,
 )
 from bridge.vault import (
     InProcessVault,
@@ -83,8 +93,15 @@ def _outcome_summary(name: str, ok: bool) -> None:
 # ── Scenario primitives ─────────────────────────────────────────────────────
 
 
-USER_SECRET = "demo-user-signing-secret"
-MINT_SECRET = "demo-vault-mint-secret"
+# Demo secrets generated fresh per process. NEVER copy these constants
+# into a deployment; they exist only so the CLI scenarios run end-to-end
+# without an external Vault. A real deployment loads secrets from the
+# environment, a secrets manager, or an HSM, and the user signing secret
+# lives client-side (WebAuthn / Passkey), never on the bridge.
+import secrets as _secrets
+
+USER_SECRET = _secrets.token_urlsafe(32)
+MINT_SECRET = _secrets.token_urlsafe(32)
 RAR_TYPE = "tasktracker_task_action"
 
 
@@ -116,7 +133,7 @@ def _sign_and_mint(vault, command: str, args: dict, approver_id: str = "alice"):
         command=command, args=args, rar_type=RAR_TYPE,
         approver_id=approver_id, secret=USER_SECRET,
     )
-    _step(f"Bridge presents signed payload to Vault for minting")
+    _step("Bridge presents signed payload to Vault for minting")
     minted = vault.mint(signed)
     _ok(f"Vault minted credential jti={minted.jti}")
     return minted
@@ -127,7 +144,7 @@ def _sign_and_mint(vault, command: str, args: dict, approver_id: str = "alice"):
 
 def scenario_full_flow(tier: int) -> bool:
     """Happy path: human approves a delete, bridge mints, dispatcher executes."""
-    _header(f"Tier {tier} — full flow (approved delete)")
+    _header(f"Tier {tier}: full flow (approved delete)")
     store, task_a, task_b = _seed_two_tasks()
     vault = _build_vault(tier)
     dispatcher = Dispatcher(client=store, vault=vault)
@@ -148,13 +165,13 @@ def scenario_full_flow(tier: int) -> bool:
     if task_b not in remaining:
         _fail(f"task {task_b} was not approved for deletion but is missing")
         return False
-    _ok(f"Approved task is deleted; bystander task survives")
+    _ok("Approved task is deleted; bystander task survives")
     return True
 
 
 def scenario_parameter_drift(tier: int) -> bool:
     """LLM substitutes a different task_id after the human's approval. Dispatcher refuses."""
-    _header(f"Tier {tier} — parameter drift (LLM substitutes a different task_id)")
+    _header(f"Tier {tier}: parameter drift (LLM substitutes a different task_id)")
     store, task_a, task_b = _seed_two_tasks()
     vault = _build_vault(tier)
     dispatcher = Dispatcher(client=store, vault=vault)
@@ -172,13 +189,13 @@ def scenario_parameter_drift(tier: int) -> bool:
     if task_a not in remaining or task_b not in remaining:
         _fail("a task was deleted despite the dispatcher refusing")
         return False
-    _ok("Both tasks survive — drift attempt did not reach the executor")
+    _ok("Both tasks survive - drift attempt did not reach the executor")
     return True
 
 
 def scenario_replay(tier: int) -> bool:
     """Same credential used twice. Second use is rejected."""
-    _header(f"Tier {tier} — replay (credential reused)")
+    _header(f"Tier {tier}: replay (credential reused)")
     store, task_a, _ = _seed_two_tasks()
     vault = _build_vault(tier)
     dispatcher = Dispatcher(client=store, vault=vault)
@@ -203,42 +220,128 @@ def scenario_replay(tier: int) -> bool:
     return True
 
 
-def scenario_unforgeable_without_mint_secret() -> bool:
-    """Tier 2 only: a rogue Vault can sign-and-mint its own JWT, but the
-    legit dispatcher refuses to validate it because the mint secret differs.
+def scenario_translation_round_trip() -> bool:
+    """Pattern 1: A2A↔MCP protocol translation.
+
+    Walks the (authorization_details, context_id, binding_message) tuple
+    through both translation directions and asserts the round-trip
+    preserves the load-bearing properties. Companion to the Pattern-2
+    scenarios above; together they cover both of the bridge's
+    publishable patterns.
     """
-    _header("Tier 2 — unforgeable without the Vault's mint secret")
+    _header("Pattern 1: A2A↔MCP translation round-trip")
+
+    authorization_details = {
+        "type": RAR_TYPE,
+        "command": "delete-task",
+        "args": {"task_id": "task-42"},
+    }
+    a2a_event = A2aAuthRequiredEvent(
+        task_id="task-001",
+        context_id="ctx-abc123",
+        authorization_details=authorization_details,
+        binding_message="Delete the Q2 launch checklist?",
+    )
+    _step("A2A: agent emits task_status_update state=auth_required")
+
+    mcp_request = a2a_auth_required_to_mcp_elicitation(
+        a2a_event, bridge_base_url="https://bridge.example",
+    )
+    if mcp_request.mode != "url":
+        _fail(f"expected url-mode elicitation, got {mcp_request.mode!r}")
+        return False
+    _ok(f"Bridge translated to MCP elicitation (mode={mcp_request.mode}, "
+        f"elicitation_id={mcp_request.elicitation_id})")
+
+    if mcp_request.authorization_details is not authorization_details:
+        _fail("authorization_details was not forwarded byte-identical")
+        return False
+    _ok("authorization_details forwarded byte-identical - signer sees what agent proposed")
+
+    _step("Human (via MCP host) approves and signs")
+    signed = sign_authorization_details(
+        command=a2a_event.authorization_details["command"],
+        args=a2a_event.authorization_details["args"],
+        rar_type=a2a_event.authorization_details["type"],
+        approver_id="alice@example.com",
+        secret=USER_SECRET,
+    )
+
+    _step("MCP host returns elicitation/response (accept) with signed payload")
+    mcp_response = McpElicitationResponse(
+        elicitation_id=mcp_request.elicitation_id,
+        action="accept",
+        signed_payload={
+            "command": signed.command, "args": signed.args, "rar_type": signed.rar_type,
+            "exp": signed.exp, "approver_id": signed.approver_id, "signature": signed.signature,
+        },
+    )
+
+    a2a_resume = mcp_elicitation_response_to_a2a_resume(mcp_response)
+    if a2a_resume.context_id != a2a_event.context_id:
+        _fail(f"context_id continuity broken: {a2a_resume.context_id!r} != "
+              f"{a2a_event.context_id!r}")
+        return False
+    _ok(f"Bridge translated back to A2A resume "
+        f"(context_id={a2a_resume.context_id} round-tripped intact)")
+
+    if not a2a_resume.approved:
+        _fail("a resume from action=accept must yield approved=True")
+        return False
+    _ok("approved=True; A2A executor can now unblock its HITL gate")
+    return True
+
+
+def scenario_vault_key_isolation() -> bool:
+    """Tier 2: Vault-to-Vault key isolation.
+
+    Demonstrates a *narrow* property: a JWT minted by one OAuthVault
+    instance does not validate at a different OAuthVault instance whose
+    mint_secret differs. The dispatcher refuses with SignatureMismatch.
+
+    This is NOT a demonstration of Zero Trust under agent compromise.
+    The realistic agent-process-compromise adversary (in the HS256
+    reference) holds BOTH the user signing secret AND the mint secret,
+    because the demo configuration co-locates them. That stronger
+    property is tested in
+    tests/e2e/test_dispatcher_vault_integration.py::
+    test_tier2_attacker_without_user_secret_cannot_forge_a_new_signature.
+
+    This scenario is published as evidence of cross-Vault key
+    independence, useful when a single Vault deployment hosts multiple
+    isolated trust domains.
+    """
+    _header("Tier 2: Vault-to-Vault key isolation")
     store, task_a, _ = _seed_two_tasks()
 
     legit_vault = OAuthVault(
         user_signing_secret=USER_SECRET, mint_secret=MINT_SECRET, expected_rar_type=RAR_TYPE,
     )
-    rogue_vault = OAuthVault(
-        user_signing_secret=USER_SECRET, mint_secret="ROGUE-VAULT-SECRET", expected_rar_type=RAR_TYPE,
+    other_vault = OAuthVault(
+        user_signing_secret=USER_SECRET, mint_secret="DIFFERENT-VAULT-MINT-SECRET-32B", expected_rar_type=RAR_TYPE,
     )
     dispatcher = Dispatcher(client=store, vault=legit_vault)
 
-    _step("Adversary captures the human's signed RAR payload")
+    _step("A different Vault instance (different mint_secret) signs a token for this action")
     signed = sign_authorization_details(
         command="delete-task", args={"task_id": task_a}, rar_type=RAR_TYPE,
         approver_id="alice", secret=USER_SECRET,
     )
-    _step("Adversary stands up a rogue Vault and mints their own JWT")
-    rogue_credential = rogue_vault.mint(signed)
-    _ok("Rogue mint succeeded — adversary has a structurally-valid JWT")
+    other_credential = other_vault.mint(signed)
+    _ok("Foreign-Vault mint produced a structurally-valid JWT")
 
-    _step("Adversary presents the rogue JWT to the legitimate dispatcher")
+    _step("Foreign-Vault JWT presented to the dispatcher backed by the LEGITIMATE Vault")
     outcome = dispatcher.execute(
-        "delete-task", {"task_id": task_a}, approval_token=rogue_credential.credential
+        "delete-task", {"task_id": task_a}, approval_token=other_credential.credential
     )
     if not isinstance(outcome, ApprovalRequired):
-        _fail(f"dispatcher accepted a rogue-Vault JWT — Zero Trust property broken")
+        _fail("dispatcher accepted a JWT from a foreign Vault - key isolation broken")
         return False
-    _rejected("Dispatcher refused the rogue JWT", reason=outcome.reason or "")
+    _rejected("Dispatcher refused the foreign-Vault JWT", reason=outcome.reason or "")
     if task_a not in {t["task_id"] for t in store.list()}:
-        _fail("rogue JWT caused a delete")
+        _fail("foreign-Vault JWT caused a delete")
         return False
-    _ok("Task survives — Zero Trust property holds")
+    _ok("Task survives - cross-Vault key isolation holds")
     return True
 
 
@@ -246,11 +349,12 @@ def scenario_unforgeable_without_mint_secret() -> bool:
 
 
 _SCENARIOS: dict[str, Callable[[argparse.Namespace], bool]] = {
-    "tier1":       lambda a: scenario_full_flow(tier=1),
-    "tier2":       lambda a: scenario_full_flow(tier=2),
-    "drift":       lambda a: scenario_parameter_drift(tier=a.tier),
-    "replay":      lambda a: scenario_replay(tier=a.tier),
-    "unforgeable": lambda a: scenario_unforgeable_without_mint_secret(),
+    "tier1":          lambda a: scenario_full_flow(tier=1),
+    "tier2":          lambda a: scenario_full_flow(tier=2),
+    "drift":          lambda a: scenario_parameter_drift(tier=a.tier),
+    "replay":         lambda a: scenario_replay(tier=a.tier),
+    "key-isolation":  lambda a: scenario_vault_key_isolation(),
+    "translation":    lambda a: scenario_translation_round_trip(),
 }
 
 
@@ -260,7 +364,8 @@ def _run_all(args: argparse.Namespace) -> bool:
         results.append((f"tier{tier} full flow", scenario_full_flow(tier=tier)))
         results.append((f"tier{tier} drift", scenario_parameter_drift(tier=tier)))
         results.append((f"tier{tier} replay", scenario_replay(tier=tier)))
-    results.append(("tier2 unforgeable", scenario_unforgeable_without_mint_secret()))
+    results.append(("tier2 key-isolation", scenario_vault_key_isolation()))
+    results.append(("pattern-1 translation", scenario_translation_round_trip()))
 
     _header("Summary")
     for name, ok in results:
@@ -289,13 +394,15 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--tier", type=int, choices=(1, 2), default=1,
                        help="which Vault tier to exercise (default: 1)")
 
-    demo_sub.add_parser("unforgeable",
-                        help="Tier-2 only: rogue Vault cannot produce a credential the legit dispatcher accepts")
+    demo_sub.add_parser("key-isolation",
+                        help="Tier-2: JWT minted by one Vault does not validate at another (narrow property)")
+    demo_sub.add_parser("translation",
+                        help="Pattern 1: A2A↔MCP protocol translation round-trip")
     demo_sub.add_parser("all", help="run every scenario and summarise")
 
     walk = sub.add_parser(
         "walkthrough",
-        help="step-by-step simulation of the wiki sequence diagram",
+        help="step-by-step simulation of the sequence diagram in `docs/architecture.md`",
     )
     walk.add_argument("--tier", type=int, choices=(1, 2), default=2,
                       help="which Vault tier to walk through (default: 2)")

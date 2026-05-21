@@ -1,6 +1,6 @@
 """Separated Resource Server with independent JWT validation.
 
-In the wiki's three-layer architecture (rationale page §"How the bridge
+In the three-layer architecture documented in `docs/architecture.md` (rationale page §"How the bridge
 weaves the tiers together"; architecture page §"Component map"), the
 Vault mints credentials and the Resource Server validates them
 *independently* — same JWT, separate validation path, separate state.
@@ -17,8 +17,8 @@ Why separation matters even in this HS256-based reference:
 
   - **Independence of state**: the Vault's consumed-jti set and the RS's
     consumed-jti set are different objects. A bug or compromise in one
-    does not affect the other. The wiki's "three independent enforcement
-    layers" claim requires this.
+    does not affect the other. The "three independent enforcement
+    layers" claim documented in ``docs/architecture.md`` requires this.
   - **Independence of validation**: the RS validates the JWT against its
     own configured verification key. In HS256 the symmetric secret is
     the same as the mint secret (a limitation of HS256); in the
@@ -30,14 +30,14 @@ Why separation matters even in this HS256-based reference:
 
 The dispatcher's role becomes purely "hold the HITL gate; forward to RS
 once approved." Validation and execution happen at the RS, not at the
-dispatcher. This matches the wiki's component diagram.
+dispatcher. This matches the component diagram in `docs/architecture.md`.
 """
 from __future__ import annotations
 
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Union
+from typing import Any
 
 from bridge.core.client import ApiError
 from bridge.core.registry import REGISTRY
@@ -46,12 +46,11 @@ from bridge.vault.interface import (
     CredentialExpired,
     CredentialReplay,
     MalformedCredential,
-    PayloadDriftAtMint,
     SignatureMismatch,
     UnknownIssuer,
     WrongAudience,
 )
-from bridge.vault.oauth import _jwt_decode
+from bridge.vault.oauth import _audience_matches, jwt_decode
 
 
 # ── RS-level outcomes ───────────────────────────────────────────────────────
@@ -77,7 +76,7 @@ class RsRejected:
     detail: str
 
 
-RsOutcome = Union[RsSuccess, RsError, RsRejected]
+RsOutcome = RsSuccess | RsError | RsRejected
 
 
 # ── Resource server ─────────────────────────────────────────────────────────
@@ -119,6 +118,12 @@ class JwtResourceServer:
         client: Any,
         expected_rar_type: str | None = None,
     ) -> None:
+        from bridge.vault.oauth import _require_nonempty_secret
+        _require_nonempty_secret("verification_secret", verification_secret)
+        if not expected_issuer:
+            raise ValueError("JwtResourceServer requires a non-empty expected_issuer")
+        if not expected_audience:
+            raise ValueError("JwtResourceServer requires a non-empty expected_audience")
         self._verification_secret = verification_secret
         self._expected_issuer = expected_issuer
         self._expected_audience = expected_audience
@@ -140,7 +145,7 @@ class JwtResourceServer:
         """
         # 1. structural + cryptographic
         try:
-            claims = _jwt_decode(credential, self._verification_secret)
+            claims = jwt_decode(credential, self._verification_secret)
         except (MalformedCredential, SignatureMismatch) as exc:
             return RsRejected(reason=type(exc).__name__, detail=str(exc))
 
@@ -154,7 +159,7 @@ class JwtResourceServer:
         try:
             jti = self._consume_authorization_details(claims, command, args)
         except (
-            PayloadDriftAtMint, CredentialReplay, CredentialDrift,
+            MalformedCredential, CredentialReplay, CredentialDrift,
         ) as exc:
             return RsRejected(reason=type(exc).__name__, detail=str(exc))
 
@@ -164,13 +169,16 @@ class JwtResourceServer:
     # ── private validators ─────────────────────────────────────────────
 
     def _validate_claims(self, claims: dict) -> None:
-        if time.time() > float(claims.get("exp", 0)):
+        # exp is integer seconds per CANONICAL.md spec; the RS treats it
+        # as such (matches OAuthVault.consume and prevents accepting
+        # spec-violating float exp values).
+        if time.time() > int(claims.get("exp", 0)):
             raise CredentialExpired(f"jti={claims.get('jti')} expired at RS")
         if claims.get("iss") != self._expected_issuer:
             raise UnknownIssuer(
                 f"token iss={claims.get('iss')!r} != RS expected {self._expected_issuer!r}"
             )
-        if claims.get("aud") != self._expected_audience:
+        if not _audience_matches(claims.get("aud"), self._expected_audience):
             raise WrongAudience(
                 f"token aud={claims.get('aud')!r} != RS expected {self._expected_audience!r}"
             )
@@ -178,7 +186,7 @@ class JwtResourceServer:
     def _consume_authorization_details(self, claims: dict, command: str, args: dict) -> str:
         ad_list = claims.get("authorization_details") or []
         if not ad_list:
-            raise PayloadDriftAtMint("token has no authorization_details claim")
+            raise MalformedCredential("token has no authorization_details claim")
         ad = ad_list[0]
 
         jti = claims.get("jti", "")
@@ -194,7 +202,7 @@ class JwtResourceServer:
                     f"token bound to args={ad.get('args')!r}, RS asked for {args!r}"
                 )
             if self._expected_rar_type is not None and ad.get("type") != self._expected_rar_type:
-                raise PayloadDriftAtMint(
+                raise CredentialDrift(
                     f"token rar_type={ad.get('type')!r} != RS expected {self._expected_rar_type!r}"
                 )
             self._consumed.add(jti)

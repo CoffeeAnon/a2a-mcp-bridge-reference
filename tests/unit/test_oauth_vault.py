@@ -1,4 +1,4 @@
-"""OAuthVault — Tier 2 JWT-minting verifier.
+"""OAuthVault: Tier 2 JWT-minting verifier.
 
 Tier 2 differs from Tier 1 in shape but holds the same security properties:
 parameter-binding, single-use, expiry, signature verification. Plus: the
@@ -24,8 +24,8 @@ from bridge.vault import (
 )
 
 
-USER_SECRET = "user-side-signing-secret"
-MINT_SECRET = "vault-mint-secret"
+USER_SECRET = "user-side-signing-secret-16b"
+MINT_SECRET = "vault-mint-secret-16bytes-yes"
 RAR_TYPE = "tasktracker_task_action"
 
 
@@ -55,7 +55,7 @@ def test_minted_credential_is_a_jwt(vault):
     signed = _signed()
     minted = vault.mint(signed)
     assert minted.credential.count(".") == 2
-    # Credential is NOT equal to the input signature — it's a freshly-issued JWT.
+    # Credential is NOT equal to the input signature; it's a freshly-issued JWT.
     assert minted.credential != signed.signature
 
 
@@ -78,7 +78,7 @@ def test_minted_credential_contains_authorization_details(vault):
 
 
 def test_mint_rejects_bad_user_signature(vault):
-    signed = _signed(secret="wrong-user-secret")
+    signed = _signed(secret="wrong-user-secret-16bytes-yes")
     with pytest.raises(SignatureMismatch):
         vault.mint(signed)
 
@@ -137,8 +137,8 @@ def test_consume_rejects_tampered_jwt(vault):
 
 def test_consume_rejects_jwt_from_a_different_vault():
     """A JWT minted by one Vault must not validate against another."""
-    vault_a = OAuthVault(user_signing_secret=USER_SECRET, mint_secret="vault-A")
-    vault_b = OAuthVault(user_signing_secret=USER_SECRET, mint_secret="vault-B")
+    vault_a = OAuthVault(user_signing_secret=USER_SECRET, mint_secret="vault-A-16bytes-minimum")
+    vault_b = OAuthVault(user_signing_secret=USER_SECRET, mint_secret="vault-B-16bytes-minimum")
     minted = vault_a.mint(_signed())
     with pytest.raises(SignatureMismatch):
         vault_b.consume(minted.credential, "delete-task", {"task_id": "t-42"})
@@ -148,7 +148,7 @@ def test_consume_rejects_jwt_from_a_different_vault():
 
 
 def test_consume_rejects_malformed_jwt(vault):
-    """Token has no dots — not structurally a JWT."""
+    """Token has no dots: not structurally a JWT."""
     with pytest.raises(MalformedCredential):
         vault.consume("not-a-jwt", "delete-task", {"task_id": "t-42"})
 
@@ -206,7 +206,7 @@ def test_consume_rejects_malformed_jwt_body(vault):
 
     Constructed by signing a junk body with the Vault's own mint secret so
     we get past the signature check and exercise the body-decode failure
-    path — an unusual but real adversary scenario (malicious mint, bug).
+    path; an unusual but real adversary scenario (malicious mint, bug).
     """
     import hashlib as _h
     import hmac as _hmac
@@ -257,6 +257,53 @@ def test_consume_rejects_wrong_audience():
 
 
 # ── consume: expiry ───────────────────────────────────────────────────────
+
+
+def test_mint_rejects_expired_signed_payload(vault):
+    """The Vault is the policy point for credential lifetime. A signer
+    that submits an already-expired payload is rejected at mint time,
+    not silently minted into an immediately-stale JWT."""
+    stale = sign_authorization_details(
+        command="delete-task", args={"task_id": "t-42"}, rar_type=RAR_TYPE,
+        approver_id="alice", secret=USER_SECRET, ttl_seconds=-60,
+    )
+    with pytest.raises(CredentialExpired):
+        vault.mint(stale)
+
+
+def test_mint_rejects_overlong_ttl():
+    """A signer that proposes a decade-long ``exp`` is rejected at mint.
+    The Vault's ``max_signed_payload_ttl_seconds`` is the policy bound."""
+    vault = OAuthVault(
+        user_signing_secret=USER_SECRET,
+        mint_secret=MINT_SECRET,
+        expected_rar_type=RAR_TYPE,
+        max_signed_payload_ttl_seconds=300,
+    )
+    # Sign with a 10x-over-policy TTL.
+    signed = sign_authorization_details(
+        command="delete-task", args={"task_id": "t-42"}, rar_type=RAR_TYPE,
+        approver_id="alice", secret=USER_SECRET, ttl_seconds=3000,
+    )
+    with pytest.raises(PayloadDriftAtMint, match="exceeds Vault max_ttl"):
+        vault.mint(signed)
+
+
+def test_mint_accepts_within_ttl_bounds():
+    """Sanity: an ``exp`` within bounds is fine."""
+    vault = OAuthVault(
+        user_signing_secret=USER_SECRET,
+        mint_secret=MINT_SECRET,
+        expected_rar_type=RAR_TYPE,
+        max_signed_payload_ttl_seconds=600,
+    )
+    signed = sign_authorization_details(
+        command="delete-task", args={"task_id": "t-42"}, rar_type=RAR_TYPE,
+        approver_id="alice", secret=USER_SECRET, ttl_seconds=300,
+    )
+    # Should not raise.
+    minted = vault.mint(signed)
+    assert minted.exp > int(time.time())
 
 
 def test_consume_rejects_expired(vault, monkeypatch):

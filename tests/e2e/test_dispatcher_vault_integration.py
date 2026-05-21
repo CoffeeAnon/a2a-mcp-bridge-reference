@@ -21,8 +21,8 @@ from bridge.vault import (
 )
 
 
-USER_SECRET = "user-secret"
-MINT_SECRET = "mint-secret"
+USER_SECRET = "user-secret-16bytes-minimum"
+MINT_SECRET = "mint-secret-16bytes-minimum"
 RAR_TYPE = "tasktracker_task_action"
 
 
@@ -39,8 +39,8 @@ def _signed(command, args, secret=USER_SECRET):
 @pytest.fixture
 def seeded_client():
     client = InMemoryTaskStore()
-    a = client.create(title="A — promised for deletion")
-    b = client.create(title="B — must survive drift attempts")
+    a = client.create(title="A: promised for deletion")
+    b = client.create(title="B: must survive drift attempts")
     return client, a["task_id"], b["task_id"]
 
 
@@ -136,32 +136,39 @@ def test_tier2_drift_attempt_does_not_execute(seeded_client):
     assert outcome.reason == "CredentialDrift"
 
 
-def test_tier2_compromised_agent_cannot_escalate_to_different_action(seeded_client):
-    """*** The Zero-Trust property in test form. ***
+def test_tier2_attacker_without_user_secret_cannot_forge_a_new_signature(seeded_client):
+    """*** Zero-Trust property in test form (production-shape only). ***
 
-    Realistic threat model: the agent process is compromised. The attacker
-    has access to *everything the agent holds* — that includes the user
-    signing secret AND the Vault mint secret in this HS256 reference
-    (a Tier-2 deployment with the Vault in-process has both keys
-    co-located; honest about that limitation in the OAuthVault docstring).
+    Honest scope: this test models the **production** Tier-2 deployment
+    where the user signing key lives client-side (WebAuthn / Passkey)
+    and the bridge/agent process never holds it. In the **HS256 demo
+    configuration** the bridge process holds *both* secrets and an
+    attacker with code execution there has both; that case is NOT
+    what this test covers. See README §"Limitations" and the
+    docs/architecture.md threat-model row "Compromised agent process"
+    for the demo-mode caveat.
 
-    What the attacker CANNOT do, even with both secrets: cause the legit
-    Vault to mint a credential for an action the *human did not sign*.
-    The Vault verifies the signature is over the (command, args)
-    payload the human approved. An attacker who has captured the human's
-    signed payload for "delete task A" cannot turn it into a credential
-    for "delete task B" without forging a new human signature for task B —
-    which the attacker cannot do unless they also have the human's
-    private signing capability (e.g., the WebAuthn-bound key in a
-    production deployment, or in this HS256 reference, the user_signing_
-    secret — which in real life lives on the user's MCP host, not on
-    the agent process).
+    Production-shape threat model: the attacker has compromised the
+    agent process and therefore holds whatever the agent's process
+    holds; the user signing key lives on the human's MCP host
+    (WebAuthn, Passkey, or equivalent), NOT on the agent. The attacker
+    can re-use *previously-signed* payloads (within their TTL) but
+    cannot forge a signature for an action the human did not approve.
 
-    In the production-shape deployment the user signing capability is
-    held by a WebAuthn-bound authenticator on the human's device. An
-    agent-process attacker who somehow obtained mint_secret still cannot
-    forge a new human signature. This test models that asymmetry by
-    using a "user secret" the adversary does not have access to.
+    This test demonstrates that asymmetry: the simulated attacker has
+    the captured signed payload for "delete task A" and tries to
+    alter its `args` to "delete task B" (mutating the dataclass field
+    while leaving the signature intact). The Vault refuses to mint
+    because the signature does not verify over the mutated payload.
+
+    Note on the demo-mode caveat: when run end-to-end inside *this
+    test process*, both secrets are in memory. The test does not give
+    the simulated attacker `USER_SECRET`; it gives it the
+    `SignedAuthorizationDetails` object that was produced earlier
+    and tries to forge by mutation. The realistic attacker in the
+    HS256 co-located demo would simply call `sign_authorization_details`
+    with the user secret directly, and the property would fail; the
+    HS256 reference is honest about that in the docs.
     """
     client, promised_id, drift_id = seeded_client
     vault = OAuthVault(
@@ -223,6 +230,6 @@ def test_tier2_compromised_agent_can_remint_same_action_within_ttl(seeded_client
     assert first_credential.jti != second_credential.jti
     assert first_credential.credential != second_credential.credential
 
-    # Each can be consumed independently — though only one execution
+    # Each can be consumed independently, though only one execution
     # actually makes sense for a delete (the second would 404 at the RS).
     # The point is: the Vault did not refuse the second mint.

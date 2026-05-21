@@ -18,11 +18,12 @@ A payload is a JSON object with exactly five top-level keys:
 
 Canonical bytes are produced by:
 
-```
+```python
 canonical_bytes = json.dumps(
     {"cmd": cmd, "args": args, "rar_type": rar_type, "exp": exp, "approver_id": approver_id},
     sort_keys=True,          # recursive — sorts keys at every nesting level
     separators=(",", ":"),   # no whitespace anywhere
+    # ensure_ascii is True by default — see "Non-ASCII strings" below
 ).encode("utf-8")
 ```
 
@@ -31,6 +32,7 @@ In other languages, produce bytes equivalent to a JSON encoder that:
 1. **Sorts object keys** at every nesting level (lexicographic, by Unicode code point).
 2. **Emits no whitespace** between tokens (`{"a":1,"b":2}`, not `{"a": 1, "b": 2}`).
 3. **Encodes as UTF-8**.
+4. **Escapes every non-ASCII character as `\uXXXX`** (UTF-16 surrogate pairs for code points outside the BMP). This matches Python's `json.dumps(ensure_ascii=True)` default and is REQUIRED for byte-stability across language implementations. JavaScript's `JSON.stringify` does *not* do this by default — a JS signer MUST post-process the output to escape every non-ASCII code point before HMAC computation, or use a JSON library configured to emit ASCII-only output.
 
 ## Type constraints (load-bearing)
 
@@ -41,6 +43,19 @@ These are the cross-language stability rules:
 - Must be UTF-8.
 - **Signers SHOULD apply Unicode NFC normalisation** before signing. If a signer emits `é` (é, precomposed) and a verifier expects `é` (é, decomposed), the signatures will differ. The reference does not normalise on either side; it relies on the signer to produce canonical Unicode.
 - Strings MUST NOT contain control characters (U+0000 through U+001F) unless escaped per RFC 8259. The reference's Python `json.dumps` escapes them automatically.
+
+#### Non-ASCII strings (load-bearing for cross-language signers)
+
+Python's `json.dumps` defaults to `ensure_ascii=True`, which emits non-ASCII characters as `\uXXXX` escape sequences in the JSON output. The reference uses this default. **A non-Python signer producing canonical bytes MUST do the same.**
+
+Example with `approver_id = "alïce@example.com"` (note the `ï`, U+00EF):
+
+- Python (canonical, reference behaviour): emits `alïce@example.com` — the ASCII-escape form.
+- JavaScript `JSON.stringify` (NON-canonical by default): emits the raw `ï` as UTF-8 bytes `0xc3 0xaf`.
+
+These produce *different* byte strings, *different* HMACs, and the verifier will reject the JS-signed token as `SignatureMismatch`. JavaScript signers either need to use a JSON library with an `ensure_ascii`/`ascii_only` option, or post-process the JSON output to escape every code point > U+007F. Surrogate pairs for code points above U+FFFF must be emitted as two `\uXXXX` escapes per RFC 8259.
+
+Fixture `test_fixture_6_nonascii_approver_id` in `tests/unit/test_canonical_fixtures.py` locks down the byte-exact canonical output for this case so cross-language implementations have a concrete target.
 
 ### `args` — object
 
@@ -55,6 +70,7 @@ These are the cross-language stability rules:
 - Seconds since 1970-01-01 UTC, no leap seconds (POSIX time).
 - **Must be a JSON integer**, never a float. The reference's `sign_authorization_details` truncates `time.time()` to int specifically to avoid cross-language float-repr drift.
 - Recommended TTL: 300 seconds (5 minutes).
+- The reference Vault enforces an upper bound on the signer's requested TTL at mint time via the `max_signed_payload_ttl_seconds` constructor parameter (default 600s). A signed payload with `exp` further in the future than that bound is rejected at `mint` with `PayloadDriftAtMint`. Signers SHOULD set `exp` to `now + 300`; values much larger will be refused.
 
 ## Signature
 
@@ -88,7 +104,7 @@ canonical_authorization_bytes("delete-task", {"task_id": "t-42"},
 
 Note: top-level keys are emitted alphabetically (`approver_id` < `args` < `cmd` < `exp` < `rar_type`).
 
-With `user_signing_key = "demo-user-signing-secret"`:
+With `user_signing_key = "demo-user-signing-secret"` (this is a fixture value used to pin the canonical output for cross-language signer verification — NEVER use this string as a real deployment secret):
 
 ```python
 import hmac, hashlib

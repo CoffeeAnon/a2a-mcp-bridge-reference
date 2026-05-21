@@ -15,7 +15,7 @@ import contextlib
 import logging
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from mcp import types as mcp_types
 from mcp.server.lowlevel import Server
@@ -24,8 +24,8 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount
 
-from bridge.agent.audit import AuditRow, AuditSink
-from bridge.agent.invoker import ToolInvoker
+from bridge.audit import AuditRow, AuditSink
+from bridge.mcp.invoker import ToolInvoker
 from bridge.auth.hmac import CallerIdentity, TokenStore
 from bridge.mcp.auth import AuthError, verify_bearer
 from bridge.mcp.tools import mcp_tool_specs

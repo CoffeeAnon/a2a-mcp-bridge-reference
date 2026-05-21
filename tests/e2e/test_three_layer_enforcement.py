@@ -1,6 +1,6 @@
 """End-to-end: parameter-binding through three independent enforcement layers.
 
-The wiki commits the Tier-2 architecture to three layers:
+``docs/architecture.md`` commits the Tier-2 architecture to three layers:
   1. Vault verifies the human's signature BEFORE minting.
   2. The bridge cannot alter the minted claim (it forwards the JWT unchanged).
   3. The resource server validates the minted JWT's authorization_details
@@ -10,8 +10,8 @@ These tests exercise each layer through real code paths. The Vault and the
 ResourceServer are separate objects with separate state; the dispatcher
 forwards credentials from one to the other without modification.
 
-If any of these tests pass when they should fail, the wiki's "three
-independent enforcement layers" claim is broken.
+If any of these tests pass when they should fail, the "three independent
+enforcement layers" claim is broken.
 """
 import pytest
 
@@ -24,8 +24,8 @@ from bridge.vault import (
 )
 
 
-USER_SECRET = "test-user-secret"
-MINT_SECRET = "test-mint-secret"
+USER_SECRET = "test-user-secret-16bytes-min"
+MINT_SECRET = "test-mint-secret-16bytes-min"
 ISSUER = "https://vault.reference.invalid"
 AUDIENCE = "bridge-resource-server"
 RAR_TYPE = "tasktracker_task_action"
@@ -97,28 +97,30 @@ def test_layer1_vault_refuses_bad_signature(separated_setup):
 # ── Layer 2: bridge cannot alter the minted claim ──────────────────────────
 
 
-def test_layer2_bridge_forwards_credential_unchanged(separated_setup):
-    """Layer 2: the dispatcher forwards the credential to the RS unmodified.
+def test_layer3_rs_catches_credential_mutation_in_transit(separated_setup):
+    """Layer 3 again, in a "what if Layer 2 failed?" framing.
 
-    Demonstrated by: the JWT presented to the RS is byte-identical to the
-    one the Vault minted. (We can't easily intercept the call inside the
-    dispatcher in pure Python, but we can prove the property by mutating
-    the credential and observing the RS rejects.)
+    Layer 2 ("the bridge cannot alter the minted claim") is *structural*
+    — it's a property of ``Dispatcher._execute_via_rs`` being a 4-line
+    pass-through to ``rs.execute``. There is no dynamic test that proves
+    a structural property of that shape; you read the dispatcher's code.
+
+    What this test demonstrates is the *defence-in-depth* property: if
+    anything between mint and RS were to mutate the credential (a future
+    refactor that introduced a transformation, a buggy middleware, an
+    attacker who compromised the bridge process), the RS rejects.
+    Layer 3 catches what Layer 2's structural pass-through is supposed
+    to make impossible in the first place.
     """
     _, vault, _, dispatcher, promised, _ = separated_setup
     minted = _mint(vault, "delete-task", {"task_id": promised})
 
-    # Modify a single byte in the JWT body. The bridge has no opportunity
-    # to "patch" this back to the original because the dispatcher is a
-    # straight pass-through; the RS will see the modified token.
     header, body, sig = minted.credential.split(".")
     flipped_body_char = "A" if body[-1] != "A" else "B"
     tampered = f"{header}.{body[:-1]}{flipped_body_char}.{sig}"
 
     outcome = dispatcher.execute("delete-task", {"task_id": promised}, approval_token=tampered)
 
-    # The RS rejects because the signature no longer verifies over the
-    # tampered body — proving the bridge cannot have repaired the token.
     assert isinstance(outcome, ApprovalRequired)
     assert outcome.reason == "SignatureMismatch"
 
@@ -172,6 +174,89 @@ def test_independence_vault_and_rs_consumed_state_are_separate(separated_setup):
 
 
 # ── Layer 3 catches what Layer 1 + bridge tampering would miss ─────────────
+
+
+def test_rs_rejects_token_signed_with_different_mint_secret():
+    """Sibling of test_rs_rejects_token_for_different_audience but at
+    the secret-config level. Demonstrates that the Layer-3 RS verifies
+    against its OWN configured key, independent of the Vault's mint
+    key. In the HS256 reference these are typically the same string;
+    this test simulates a deployment where they're different (e.g., a
+    misconfiguration, or a transitioning rotation) and proves the RS
+    detects the mismatch."""
+    client = InMemoryTaskStore()
+    task = client.create(title="target")
+    vault = OAuthVault(
+        user_signing_secret=USER_SECRET,
+        mint_secret=MINT_SECRET,
+        issuer=ISSUER,
+        audience=AUDIENCE,
+        expected_rar_type=RAR_TYPE,
+    )
+    # RS configured with a DIFFERENT verification secret than the Vault
+    # mints under. In production RS256, this is the analogous
+    # mismatch between holding the wrong public key.
+    this_rs = JwtResourceServer(
+        verification_secret="rs-has-a-different-secret-16b",
+        expected_issuer=ISSUER,
+        expected_audience=AUDIENCE,
+        expected_rar_type=RAR_TYPE,
+        client=client,
+    )
+    dispatcher = Dispatcher(resource_server=this_rs)
+
+    minted = _mint(vault, "delete-task", {"task_id": task["task_id"]})
+    outcome = dispatcher.execute(
+        "delete-task", {"task_id": task["task_id"]}, approval_token=minted.credential,
+    )
+    assert isinstance(outcome, ApprovalRequired)
+    assert outcome.reason == "SignatureMismatch"
+    assert task["task_id"] in {t["task_id"] for t in client.list()}
+
+
+def test_rs_accepts_token_when_aud_is_array():
+    """RFC 7519 permits ``aud`` to be a string OR an array of strings.
+    The reference's `OAuthVault` mints scalar `aud`; an external AS
+    (Keycloak, Authlete) commonly emits array. Verify the RS accepts
+    both shapes — otherwise the documented "production swap doesn't
+    change Vault.consume" promise is broken."""
+    import base64
+    import hashlib as _h
+    import hmac as _hmac
+    import json as _json
+    import secrets as _secrets
+    import time as _time
+
+    from bridge.vault.oauth import _b64url, jwt_encode
+
+    client = InMemoryTaskStore()
+    task = client.create(title="target")
+    rs = JwtResourceServer(
+        verification_secret=MINT_SECRET,
+        expected_issuer=ISSUER,
+        expected_audience=AUDIENCE,
+        expected_rar_type=RAR_TYPE,
+        client=client,
+    )
+
+    # Forge a token with array-shaped aud, signed with the same secret.
+    claims = {
+        "iss": ISSUER,
+        "aud": [AUDIENCE, "some-other-rs"],   # array shape, our audience present
+        "sub": "alice",
+        "iat": int(_time.time()),
+        "exp": int(_time.time()) + 60,
+        "jti": _secrets.token_hex(8),
+        "authorization_details": [{
+            "type": RAR_TYPE, "command": "delete-task",
+            "args": {"task_id": task["task_id"]},
+        }],
+    }
+    token = jwt_encode(claims, MINT_SECRET)
+
+    outcome = rs.execute("delete-task", {"task_id": task["task_id"]}, token)
+    from bridge.rs import RsSuccess
+    assert isinstance(outcome, RsSuccess)
 
 
 def test_rs_rejects_token_for_different_audience():

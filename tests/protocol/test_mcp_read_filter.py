@@ -8,8 +8,8 @@ from dataclasses import replace
 
 import pytest
 
-from bridge.agent import tools as tools_module
-from bridge.agent.tools import SPECS_BY_NAME, TOOL_SPECS, ToolSpec
+from bridge import tools as tools_module
+from bridge.tools import SPECS_BY_NAME, TOOL_SPECS, ToolSpec
 from bridge.mcp.tools import MCP_V1_ALLOWLIST, mcp_tool_specs
 
 

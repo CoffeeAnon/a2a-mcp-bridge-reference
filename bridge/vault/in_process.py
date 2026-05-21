@@ -1,6 +1,6 @@
 """Tier 1 Vault: in-process HMAC verifier.
 
-No external authorization server, no JWT minting, no JWKS — just an HMAC
+No external authorization server, no JWT minting, no JWKS: just an HMAC
 over the canonical authorization-details payload, verified in-process by
 the same dispatcher that will execute the action. The Vault's ``mint``
 step is essentially a no-op: it confirms the signature is valid, records
@@ -26,6 +26,8 @@ import secrets
 import threading
 import time
 
+import types
+
 from bridge.vault.interface import (
     CredentialDrift,
     CredentialExpired,
@@ -39,6 +41,25 @@ from bridge.vault.interface import (
 )
 
 
+_DEFAULT_MAX_SIGNED_PAYLOAD_TTL_SECONDS = 600  # see bridge/vault/oauth.py
+
+
+def _canonical_default(obj):
+    """JSON encoder hook for read-only mapping types.
+
+    ``bridge.consent.url_mode.ProposedAction`` stores ``args`` as a
+    ``types.MappingProxyType`` to make the action description immutable
+    after creation. ``json.dumps`` doesn't know how to serialise
+    MappingProxyType natively, so we provide a default that unwraps
+    it to a plain dict for serialization. The contents are the same
+    snapshot the proxy guards: bytes-identical to a hand-built dict
+    from the same source.
+    """
+    if isinstance(obj, types.MappingProxyType):
+        return dict(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def canonical_authorization_bytes(
     command: str, args: dict, rar_type: str, exp: int, approver_id: str
 ) -> bytes:
@@ -48,9 +69,12 @@ def canonical_authorization_bytes(
       - sorted keys at every nesting level (``sort_keys=True``)
       - tight separators, no whitespace (``separators=(",", ":")``)
       - ``exp`` is integer seconds since epoch (no float repr drift)
-      - list order is *significant* — the human approves [a,b] vs [b,a]
+      - list order is *significant*: the human approves [a,b] vs [b,a]
         as different actions
       - string values are caller's responsibility to NFC-normalise
+      - ``args`` may be a plain ``dict`` or a ``types.MappingProxyType``
+        (used by the consent server to make stored args immutable);
+        both produce byte-identical output.
 
     This is the load-bearing function: if signer and verifier disagree
     about the canonical form, the signature mismatches. Public so Tier 1
@@ -59,8 +83,10 @@ def canonical_authorization_bytes(
     """
     return json.dumps(
         {"cmd": command, "args": args, "rar_type": rar_type, "exp": exp, "approver_id": approver_id},
-        sort_keys=True,
-        separators=(",", ":"),
+        sort_keys=True,                  # recursive key sort at every nesting level
+        separators=(",", ":"),           # no whitespace anywhere
+        ensure_ascii=True,               # explicit: see bridge/vault/CANONICAL.md §"Non-ASCII strings"
+        default=_canonical_default,      # serialise MappingProxyType (immutable args) as plain dict
     ).encode()
 
 
@@ -99,7 +125,7 @@ class InProcessVault(Vault):
     *issuance* record (``_issued``) in the same process as ``_consumed``.
     A restart loses both. Post-restart, replays fail with
     ``SignatureMismatch`` ("jti was not issued by this Vault") because
-    the issuance record is also gone — the restart-replay window that
+    the issuance record is also gone - the restart-replay window that
     affects Tier 2 (where the JWT is self-contained) is structurally
     closed at Tier 1. The trade-off is availability: post-restart,
     legitimate-but-unused credentials are also unverifiable. For Tier 1
@@ -107,9 +133,20 @@ class InProcessVault(Vault):
     5-minute TTL.
     """
 
-    def __init__(self, *, secret: str, expected_rar_type: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        secret: str,
+        expected_rar_type: str | None = None,
+        max_signed_payload_ttl_seconds: int = _DEFAULT_MAX_SIGNED_PAYLOAD_TTL_SECONDS,
+    ) -> None:
+        from bridge.vault.oauth import _require_nonempty_secret
+        _require_nonempty_secret("secret", secret)
+        if max_signed_payload_ttl_seconds <= 0:
+            raise ValueError("max_signed_payload_ttl_seconds must be > 0")
         self._secret = secret
         self._expected_rar_type = expected_rar_type
+        self._max_ttl = max_signed_payload_ttl_seconds
         self._consumed: set[str] = set()
         self._issued: dict[str, MintedCredential] = {}
         self._lock = threading.Lock()
@@ -123,6 +160,21 @@ class InProcessVault(Vault):
         ).hexdigest()
         if not hmac.compare_digest(expected, signed.signature):
             raise SignatureMismatch("HMAC verification failed")
+
+        # 1b. Enforce signer-side `exp` bounds. The Vault is the policy
+        #     point for credential lifetime; a signer that proposes a
+        #     decade-long exp or an already-expired exp is rejected at
+        #     mint time.
+        now = time.time()
+        if signed.exp <= now:
+            raise CredentialExpired(
+                f"signed payload exp={signed.exp} is already in the past (now={now:.0f})"
+            )
+        if signed.exp > now + self._max_ttl:
+            raise PayloadDriftAtMint(
+                f"signed payload exp={signed.exp} exceeds Vault max_ttl of "
+                f"{self._max_ttl}s (would be {signed.exp - now:.0f}s out)"
+            )
 
         # 2. Validate the rar_type if the Vault was configured with one.
         if self._expected_rar_type is not None and signed.rar_type != self._expected_rar_type:
@@ -149,8 +201,8 @@ class InProcessVault(Vault):
     def consume(self, credential: str, command: str, args: dict) -> MintedCredential:
         try:
             _sig, jti = credential.rsplit(".", 1)
-        except ValueError:
-            raise MalformedCredential("Tier-1 credential must be 'signature.jti'")
+        except ValueError as exc:
+            raise MalformedCredential("Tier-1 credential must be 'signature.jti'") from exc
 
         with self._lock:
             minted = self._issued.get(jti)

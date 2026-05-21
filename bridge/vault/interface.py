@@ -1,10 +1,10 @@
-"""Vault interface — the cryptographic delegation engine.
+"""Vault interface: the cryptographic delegation engine.
 
 Every tier of the bridge expresses its trust substrate through a Vault.
-At Tier 1 (`InProcessVault`) the Vault is the in-process HMAC verifier;
-at Tier 2 (`OAuthVault`) the Vault is an external authorization server
-that mints JWTs with `authorization_details` claims. Both honour the same
-interface and the same contract:
+At Tier 1 (`InProcessVault`) the Vault is an in-process HMAC verifier.
+At Tier 2 (`OAuthVault`) it is an external authorization server that mints
+JWTs with `authorization_details` claims. Both honour the same interface
+and the same contract:
 
   - **mint**: verify the human's signature over a structured authorization
     payload (the RAR `authorization_details`) and return a single-use,
@@ -13,15 +13,14 @@ interface and the same contract:
     execution time, mark it consumed, and reject replays.
 
 The dispatcher only ever calls ``consume``. The bridge layer calls ``mint``
-in response to an elicitation approval, then passes the resulting
+in response to an elicitation approval and passes the resulting
 ``MintedCredential`` to the dispatcher.
 
-Why this matters: in the rationale page (decisions/a2a-mcp-bridge-design-
-rationale), the load-bearing security property is parameter-binding —
-the credential is pinned to the exact arguments the human approved.
-``Vault.mint`` is where that pin is set; ``Vault.consume`` is where it
-is enforced. A Vault implementation that fails either step breaks the
-property and the design contract.
+The security property this contract carries (per ``docs/rationale.md``)
+is parameter-binding: the credential is pinned to the exact arguments the
+human approved. ``Vault.mint`` is where that pin is set, and ``Vault.consume``
+is where it is enforced. A Vault implementation that fails either step
+breaks the property and the design contract.
 """
 from __future__ import annotations
 
@@ -54,7 +53,7 @@ class MalformedCredential(VaultError):
     """Credential's wire format is structurally broken (e.g., not three
     dot-separated parts for a JWT, body is not valid base64-JSON).
     Distinct from ``SignatureMismatch`` because no cryptographic check
-    was even attempted — there was nothing to check."""
+    was attempted: there was nothing to check."""
 
 
 class SignatureMismatch(VaultError):
@@ -109,7 +108,7 @@ class SignedAuthorizationDetails:
       args:                  exact arguments the human approved
       rar_type:              the RAR `authorization_details.type` string
       exp:                   POSIX seconds (integer; truncated for
-                             cross-language byte-stability — see
+                             cross-language byte-stability; see
                              ``bridge/vault/CANONICAL.md``)
       approver_id:           opaque approver identity (for audit)
       signature:             HMAC-SHA256 over the canonical JSON of {command,
@@ -131,21 +130,22 @@ class MintedCredential:
     Tier 2: ``credential`` is a freshly-minted JWT (HS256 in the reference;
     asymmetric in production) carrying ``authorization_details``.
 
-    The dispatcher does not need to know which tier produced the credential —
-    it only knows to pass it to ``Vault.consume`` at execution time.
+    The dispatcher does not need to know which tier produced the
+    credential - it only knows to pass it to ``Vault.consume`` at
+    execution time.
 
-    Fields ``command`` / ``args`` are deliberately denormalised with the
+    Fields ``command`` and ``args`` are deliberately denormalised with the
     opaque ``credential`` string: callers (audit, logging, the dispatcher's
     ``ApprovalRequired.reason`` plumbing) need the bound parameters in a
     structured form without re-decoding the credential. The Vault's
     ``consume`` method is the source of truth for whether the bound
-    parameters match the live request — these fields exist for
+    parameters match the live request - these fields exist for
     *attribution*, not for authorization decisions.
     """
     credential: str
     command: str
     args: dict
-    exp: float
+    exp: int
     jti: str  # unique identifier for single-use tracking
 
 

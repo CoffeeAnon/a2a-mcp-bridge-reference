@@ -10,11 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from bridge.agent.tools import ToolSpec
+from bridge.tools import ToolSpec
 from bridge.core.dispatcher import (
     ApprovalRequired,
     CommandError,
-    CommandSuccess,
     Dispatcher,
 )
 from bridge.core.output import error_human, to_human
@@ -47,8 +46,11 @@ class InProcessInvoker:
     same human-readable text the CLI emits.
     """
 
-    def __init__(self, dispatcher: Dispatcher | None = None) -> None:
-        self._dispatcher = dispatcher if dispatcher is not None else Dispatcher()
+    def __init__(self, dispatcher: Dispatcher) -> None:
+        """Construct with an explicitly-configured Dispatcher. The dispatcher
+        itself must have been built with a Vault or a ResourceServer; the
+        invoker does not (and cannot) supply trust substrate defaults."""
+        self._dispatcher = dispatcher
 
     def invoke(
         self,
