@@ -48,8 +48,8 @@ from bridge.vault import (  # noqa: E402
 )
 
 
-USER_SECRET = "mcp-roundtrip-user-secret-16b"
-MINT_SECRET = "mcp-roundtrip-mint-secret-16b!"
+USER_SECRET = "mcp-roundtrip-user-secret-32bytes-pad"
+MINT_SECRET = "mcp-roundtrip-mint-secret-32bytes-padxx"
 ISSUER = "https://vault.reference.invalid"
 AUDIENCE = "bridge-resource-server"
 RAR_TYPE = "tasktracker_task_action"
@@ -159,6 +159,7 @@ def test_mcp_hitl_building_blocks_happy_path(world):
         rar_type=signed_dict["rar_type"],
         exp=signed_dict["exp"],
         approver_id=signed_dict["approver_id"],
+        binding_message=signed_dict["binding_message"],
         signature=signed_dict["signature"],
     )
     minted = world["vault"].mint(signed)
@@ -195,8 +196,18 @@ def test_mcp_hitl_building_blocks_user_denies(world):
     assert result.json()["status"] == "denied"
 
     # Bridge would translate this denial into an A2A resume with approved=False.
+    # Mint a tag-verified elicitation_id via the public translator.
+    _eid_req = a2a_auth_required_to_mcp_elicitation(
+        A2aAuthRequiredEvent(
+            task_id="task-001",
+            context_id="ctx-x",
+            authorization_details={"command": "delete-task", "args": {"task_id": target["task_id"]}},
+            binding_message="m",
+        ),
+        bridge_base_url="https://bridge.example",
+    )
     mcp_response = McpElicitationResponse(
-        elicitation_id=f"el:ctx-x:task-001",
+        elicitation_id=_eid_req.elicitation_id,
         action="decline",
         signed_payload=None,
     )

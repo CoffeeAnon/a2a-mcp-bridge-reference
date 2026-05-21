@@ -40,16 +40,31 @@ The translation preserves three properties:
      MUST NOT pass through the MCP client's form-mode handler per the
      spec.
 
-The ``elicitation_id`` shape (``el:<context_id>:<task_id>``) is
-**bridge-internal**: the signer never sees it, the Vault never
-validates it, and a multi-replica bridge deployment that needs cross-
-replica elicitation routing would need to choose a different shape
-(e.g., a signed token, or a Redis-backed mapping). Not part of the
-spec at ``bridge/vault/CANONICAL.md``; the canonical-form contract
-covers only what the *signer* sees.
+The ``elicitation_id`` shape is **bridge-internal**: the signer never
+sees it, the Vault never validates it, and a multi-replica bridge
+deployment that needs cross-replica elicitation routing would need to
+share or replace this module's tag secret (or move to a signed-token
+or Redis-backed mapping). Not part of the spec at
+``bridge/vault/CANONICAL.md``; the canonical-form contract covers
+only what the *signer* sees.
+
+**Forgery resistance.** The elicitation_id encodes (context_id,
+task_id) and is appended with an HMAC-SHA256 tag over those values,
+keyed by a process-local secret generated at import time
+(``_ELICITATION_ID_SECRET``). An attacker who guesses both context_id
+and task_id cannot produce a valid elicitation_id without also
+holding the tag secret, foreclosing the "send a forged
+elicitation/response that routes to a different paused task" class
+of attack. The tag secret is in-process: a multi-replica deployment
+must configure a shared secret or replace this carrier with a signed
+token; see "Untrusted MCP host" in ``docs/architecture.md``.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac as _hmac
+import secrets as _secrets
 from dataclasses import dataclass
 
 
@@ -171,7 +186,7 @@ def a2a_auth_required_to_mcp_elicitation(
             f"{event.task_id!r}"
         )
 
-    elicitation_id = f"el:{event.context_id}:{event.task_id}"
+    elicitation_id = _mint_elicitation_id(event.context_id, event.task_id)
     return McpElicitationRequest(
         elicitation_id=elicitation_id,
         mode="url",
@@ -234,17 +249,59 @@ def _require_nonempty(value: str, name: str) -> None:
         raise TranslationError(f"{name} must not be empty")
 
 
+# ── elicitation_id signing (forgery-resistant carrier) ────────────────────
+
+
+_ELICITATION_ID_SECRET = _secrets.token_bytes(32)
+"""Process-local HMAC key for elicitation_id tags. Regenerated on each
+process start; in-flight elicitations do not survive bridge restart in
+this reference. Production deployments wanting cross-process or cross-
+replica continuity must configure a shared key or replace the carrier
+with a signed token. See module docstring."""
+
+
+def _b64url(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+
+def _mint_elicitation_id(context_id: str, task_id: str) -> str:
+    """Produce ``el:<context_id>:<task_id>:<b64url(hmac_tag)>``.
+
+    The HMAC tag binds (context_id, task_id) to the bridge's process-
+    local secret, so an attacker who knows or guesses both IDs cannot
+    forge a valid elicitation_id without also holding the secret.
+    """
+    payload = f"{context_id}:{task_id}".encode()
+    tag = _hmac.new(_ELICITATION_ID_SECRET, payload, hashlib.sha256).digest()
+    return f"el:{context_id}:{task_id}:{_b64url(tag)}"
+
+
 def _context_id_from_elicitation_id(elicitation_id: str) -> str:
     """Recover the A2A context_id from an elicitation_id minted earlier.
 
-    ``elicitation_id`` shape: ``el:<context_id>:<task_id>``. Anything
-    else is a TranslationError - these IDs are minted by us, so an
-    unexpected shape means something has tampered with them en route.
+    Shape: ``el:<context_id>:<task_id>:<b64url(hmac_tag)>``. The HMAC
+    is recomputed and compared in constant time; anything that fails
+    the check is rejected as a forgery attempt rather than parsed.
     """
     parts = elicitation_id.split(":")
-    if len(parts) < 3 or parts[0] != "el" or not parts[1]:
+    if len(parts) != 4 or parts[0] != "el" or not parts[1] or not parts[2]:
         raise TranslationError(
-            f"elicitation_id does not match expected shape 'el:<context>:<task>': "
-            f"{elicitation_id!r}"
+            f"elicitation_id does not match expected shape "
+            f"'el:<context>:<task>:<tag>': {elicitation_id!r}"
         )
-    return parts[1]
+    context_id, task_id, tag_b64 = parts[1], parts[2], parts[3]
+    payload = f"{context_id}:{task_id}".encode()
+    expected = _hmac.new(_ELICITATION_ID_SECRET, payload, hashlib.sha256).digest()
+    try:
+        # urlsafe_b64decode requires padding; restore the stripped '='.
+        provided = base64.urlsafe_b64decode(tag_b64 + "=" * (-len(tag_b64) % 4))
+    except Exception:
+        raise TranslationError(
+            f"elicitation_id tag is not valid base64url: {tag_b64!r}"
+        )
+    if not _hmac.compare_digest(expected, provided):
+        raise TranslationError(
+            "elicitation_id tag does not verify (forged or from a "
+            "previous bridge process)"
+        )
+    return context_id

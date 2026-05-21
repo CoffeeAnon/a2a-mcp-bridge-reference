@@ -9,10 +9,13 @@ bridge's consent endpoint.
 For the reference's self-contained demo we cannot launch a separate
 client process during a single ``pytest`` run, so this module provides
 a *fake signer* that runs server-side and signs on the user's behalf.
-**This module is the line a real deployment would replace.** Everything
-in ``url_mode.py`` is production-shaped (modulo the in-memory store
-and the missing user authentication on the consent page); only this
-file is demo scaffolding.
+**This module is one of the lines a real deployment would replace.**
+``url_mode.py`` carries the *shape* of a URL-mode consent surface, but
+production must additionally add consent-page user authentication,
+CSRF protection, a durable session store, and (with client-side
+signing in place) a payload-vs-stored-``ProposedAction`` check before
+calling ``Vault.mint``. See README §"Known production gaps" and
+``SECURITY.md`` for the full list.
 
 The fake signer delegates to ``bridge.vault.sign_authorization_details``
 so the demo cannot accidentally drift from the Vault's canonical-bytes
@@ -30,6 +33,7 @@ def demo_sign_as_user(
     args: dict,
     rar_type: str,
     approver_id: str,
+    binding_message: str,
     user_secret: str,
     ttl_seconds: int = 300,
 ) -> dict:
@@ -45,6 +49,7 @@ def demo_sign_as_user(
         args=args,
         rar_type=rar_type,
         approver_id=approver_id,
+        binding_message=binding_message,
         secret=user_secret,
         ttl_seconds=ttl_seconds,
     )
@@ -57,5 +62,6 @@ def demo_sign_as_user(
         "rar_type": signed.rar_type,
         "exp": signed.exp,
         "approver_id": signed.approver_id,
+        "binding_message": signed.binding_message,
         "signature": signed.signature,
     }

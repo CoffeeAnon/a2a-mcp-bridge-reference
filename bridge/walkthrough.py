@@ -210,6 +210,7 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
         args={"task_id": target["task_id"]},
         rar_type=RAR_TYPE,
         approver_id="alice@example.com",
+        binding_message=mcp_request.description,
         secret=USER_SECRET,
     )
     _success("MCP host computed HMAC over the canonical authorization_details payload")

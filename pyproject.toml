@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "a2a-mcp-bridge-reference"
 version = "0.1.0"
 description = "Reference implementation of a stateful, HITL-aware A2A↔MCP bridge with parameter-bound authorization."
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 # Core: stdlib-only.
 # The Vault, RS, dispatcher, commands, CLI, and walkthrough require

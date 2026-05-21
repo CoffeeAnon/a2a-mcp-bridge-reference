@@ -60,8 +60,37 @@ def _canonical_default(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+def _reject_floats(value, path: str = "args") -> None:
+    """Recursively reject ``float`` values anywhere in ``args``.
+
+    Floats have no stable cross-language canonical representation:
+    ``0.1 + 0.2`` may serialise as ``0.30000000000000004`` on one
+    platform and ``0.3`` on another, and Python's ``json.dumps`` and
+    JavaScript's ``JSON.stringify`` disagree on edge cases (subnormals,
+    very large magnitudes). A reference that teaches a canonical-form
+    contract cannot leave that drift surface unaddressed. Callers that
+    need fractional quantities must encode them as integers in a fixed
+    minor unit (e.g., cents instead of dollars) or as strings.
+    ``bool`` is intentionally allowed; ``bool`` is a subclass of
+    ``int`` in Python but ``isinstance(True, float)`` is False.
+    """
+    if isinstance(value, float):
+        raise TypeError(
+            f"canonical_authorization_bytes: float values are not permitted "
+            f"in args (at {path}); use integer minor units or strings. "
+            f"See bridge/vault/CANONICAL.md §Floats."
+        )
+    if isinstance(value, dict) or isinstance(value, types.MappingProxyType):
+        for k, v in value.items():
+            _reject_floats(v, path=f"{path}.{k}")
+    elif isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            _reject_floats(v, path=f"{path}[{i}]")
+
+
 def canonical_authorization_bytes(
-    command: str, args: dict, rar_type: str, exp: int, approver_id: str
+    command: str, args: dict, rar_type: str, exp: int, approver_id: str,
+    binding_message: str,
 ) -> bytes:
     """Canonical JSON serialization for HMAC computation.
 
@@ -69,20 +98,31 @@ def canonical_authorization_bytes(
       - sorted keys at every nesting level (``sort_keys=True``)
       - tight separators, no whitespace (``separators=(",", ":")``)
       - ``exp`` is integer seconds since epoch (no float repr drift)
+      - **floats are rejected** anywhere in ``args``; see ``_reject_floats``
       - list order is *significant*: the human approves [a,b] vs [b,a]
         as different actions
       - string values are caller's responsibility to NFC-normalise
       - ``args`` may be a plain ``dict`` or a ``types.MappingProxyType``
         (used by the consent server to make stored args immutable);
         both produce byte-identical output.
+      - ``binding_message`` is included so the human-readable summary the
+        user actually read is cryptographically bound to the signature.
+        Without it a compromised bridge could render "Delete tmp file"
+        while signing bytes for "Delete production DB". See
+        ``CANONICAL.md`` §"binding_message" and ``SECURITY.md``.
 
     This is the load-bearing function: if signer and verifier disagree
     about the canonical form, the signature mismatches. Public so Tier 1
     and Tier 2 Vault implementations can share one definition. The spec
     document is the contract for cross-language signer implementations.
     """
+    _reject_floats(args)
     return json.dumps(
-        {"cmd": command, "args": args, "rar_type": rar_type, "exp": exp, "approver_id": approver_id},
+        {
+            "cmd": command, "args": args, "rar_type": rar_type,
+            "exp": exp, "approver_id": approver_id,
+            "binding_message": binding_message,
+        },
         sort_keys=True,                  # recursive key sort at every nesting level
         separators=(",", ":"),           # no whitespace anywhere
         ensure_ascii=True,               # explicit: see bridge/vault/CANONICAL.md §"Non-ASCII strings"
@@ -96,6 +136,7 @@ def sign_authorization_details(
     args: dict,
     rar_type: str,
     approver_id: str,
+    binding_message: str,
     secret: str,
     ttl_seconds: int = 300,
 ) -> SignedAuthorizationDetails:
@@ -108,11 +149,14 @@ def sign_authorization_details(
     (Python's ``float`` repr would not match e.g. JavaScript's).
     """
     exp = int(time.time()) + ttl_seconds
-    payload_bytes = canonical_authorization_bytes(command, args, rar_type, exp, approver_id)
+    payload_bytes = canonical_authorization_bytes(
+        command, args, rar_type, exp, approver_id, binding_message,
+    )
     signature = hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
     return SignedAuthorizationDetails(
         command=command, args=args, rar_type=rar_type, exp=exp,
-        approver_id=approver_id, signature=signature,
+        approver_id=approver_id, binding_message=binding_message,
+        signature=signature,
     )
 
 
@@ -155,7 +199,10 @@ class InProcessVault(Vault):
         # 1. Verify HMAC.
         expected = hmac.new(
             self._secret.encode(),
-            canonical_authorization_bytes(signed.command, signed.args, signed.rar_type, signed.exp, signed.approver_id),
+            canonical_authorization_bytes(
+                signed.command, signed.args, signed.rar_type,
+                signed.exp, signed.approver_id, signed.binding_message,
+            ),
             hashlib.sha256,
         ).hexdigest()
         if not hmac.compare_digest(expected, signed.signature):

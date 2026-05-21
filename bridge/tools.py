@@ -6,6 +6,13 @@ Each ToolSpec captures:
 - `parameters`: JSON Schema exposed to the LLM
 - `cli_name`: corresponding CLI subcommand (kebab-case); None for in-process tools
 - `requires_approval`: True if the tool hits the HITL gate
+- `required_scopes`: scopes the caller's bearer must carry to execute this tool.
+  Enforced by ``Dispatcher.execute`` *before* HITL routing. The HITL gate is an
+  orthogonal concern: scope says "is this caller allowed to attempt this tool at
+  all"; HITL says "for this particular destructive attempt, did a human approve
+  this exact action shape." A reader who skips scope enforcement ends up with
+  "least privilege only for destructive things" — see ``SECURITY.md``
+  for the rationale.
 - `in_process`: True if the tool is dispatched inside the graph (not via subprocess)
 - `rar_type`: RFC 9396 `authorization_details.type` string used by the Tier-1 OAuth
   deployment to construct the consent payload. Only meaningful when
@@ -28,6 +35,7 @@ class ToolSpec:
     parameters: dict[str, Any]
     cli_name: str | None = None
     requires_approval: bool = False
+    required_scopes: tuple[str, ...] = ()
     in_process: bool = False
     rar_type: str | None = None
 
@@ -41,6 +49,7 @@ TOOL_SPECS: list[ToolSpec] = [
         cli_name="list-tasks",
         description="List all tasks with their IDs, titles, and current status.",
         parameters={"type": "object", "properties": {}, "required": []},
+        required_scopes=("tasks.read",),
     ),
     ToolSpec(
         name="get_task",
@@ -51,6 +60,7 @@ TOOL_SPECS: list[ToolSpec] = [
             "properties": dict(_TASK_ID),
             "required": ["task_id"],
         },
+        required_scopes=("tasks.read",),
     ),
     ToolSpec(
         name="create_task",
@@ -64,6 +74,7 @@ TOOL_SPECS: list[ToolSpec] = [
             },
             "required": ["title"],
         },
+        required_scopes=("tasks.write",),
     ),
     ToolSpec(
         name="update_task",
@@ -83,12 +94,14 @@ TOOL_SPECS: list[ToolSpec] = [
             },
             "required": ["task_id"],
         },
+        required_scopes=("tasks.write",),
     ),
     ToolSpec(
         name="delete_task",
         cli_name="delete-task",
         requires_approval=True,
         rar_type="tasktracker_task_action",
+        required_scopes=("tasks.write",),
         description=(
             "Delete a task by ID. Destructive; requires human approval before "
             "execution. The approval is bound to this exact task_id; any "
@@ -104,3 +117,4 @@ TOOL_SPECS: list[ToolSpec] = [
 
 
 SPECS_BY_NAME: dict[str, ToolSpec] = {s.name: s for s in TOOL_SPECS}
+SPECS_BY_CLI_NAME: dict[str, ToolSpec] = {s.cli_name: s for s in TOOL_SPECS if s.cli_name}

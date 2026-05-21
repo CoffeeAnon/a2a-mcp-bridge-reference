@@ -1,8 +1,8 @@
-"""InProcessVault — Tier 1 verifier.
+"""InProcessVault - Tier 1 verifier.
 
-The load-bearing properties: parameter-binding, single-use enforcement,
-HMAC signature verification, expiry. If any of these regress, the Tier
-1 security contract breaks.
+Core properties: parameter-binding, single-use enforcement, HMAC
+signature verification, expiry. If any of these regress, the Tier 1
+security contract breaks.
 """
 import time
 
@@ -20,7 +20,7 @@ from bridge.vault import (
 )
 
 
-SECRET = "test-shared-secret-16bytes-min"
+SECRET = "test-shared-secret-32bytes-minimum-pad"
 RAR_TYPE = "tasktracker_task_action"
 
 
@@ -29,12 +29,13 @@ def vault():
     return InProcessVault(secret=SECRET, expected_rar_type=RAR_TYPE)
 
 
-def _signed(command="delete-task", args=None, secret=SECRET):
+def _signed(command="delete-task", args=None, secret=SECRET, binding_message="Delete task t-42?"):
     return sign_authorization_details(
         command=command,
         args=args or {"task_id": "t-42"},
         rar_type=RAR_TYPE,
         approver_id="alice",
+        binding_message=binding_message,
         secret=secret,
     )
 
@@ -119,6 +120,7 @@ def test_consume_rejects_expired(vault, monkeypatch):
         args={"task_id": "t-42"},
         rar_type=RAR_TYPE,
         approver_id="alice",
+        binding_message="Delete task t-42?",
         secret=SECRET,
         ttl_seconds=1,
     )

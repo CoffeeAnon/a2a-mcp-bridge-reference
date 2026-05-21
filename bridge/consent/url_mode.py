@@ -12,8 +12,21 @@ minimal Starlette mount with three endpoints:
 
   GET  /consent/<session_id>           renders the HTML consent page
                                        with the proposed authorization_details
-  POST /consent/<session_id>/submit    accepts the signed payload from
-                                       the page's Approve handler
+  POST /consent/<session_id>/submit    handles the page's Approve / Deny
+                                       button. In this *demo*, Approve
+                                       triggers server-side signing via
+                                       ``demo_sign_as_user`` over the stored
+                                       ``ProposedAction`` — no signed payload
+                                       crosses the wire. A production
+                                       deployment with client-side signing
+                                       (WebAuthn / Passkey) would receive a
+                                       signed payload here and MUST verify
+                                       its (command, args, rar_type,
+                                       approver_id) match the stored
+                                       ``ProposedAction`` before calling
+                                       ``Vault.mint``. The demo skips that
+                                       check because the demo cannot drift
+                                       by construction; production can.
   GET  /consent/<session_id>/result    poll endpoint for the bridge's
                                        elicitation handler; returns
                                        404 until approved, then the
@@ -318,6 +331,7 @@ def build_consent_app(
             args=req.args,
             rar_type=req.rar_type,
             approver_id=req.approver_id,
+            binding_message=req.binding_message,
             user_secret=user_signing_secret,
         )
         store.submit_signed(session_id, signed)

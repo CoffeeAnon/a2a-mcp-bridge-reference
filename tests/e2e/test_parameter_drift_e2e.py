@@ -16,7 +16,7 @@ from bridge.core.dispatcher import ApprovalRequired, CommandSuccess, Dispatcher
 from bridge.vault import InProcessVault, sign_authorization_details
 
 
-USER_SECRET = "test-user-secret-16bytes-min"
+USER_SECRET = "test-user-secret-32bytes-minimum-pad"
 RAR_TYPE = "tasktracker_task_action"
 
 
@@ -37,6 +37,7 @@ def _mint_for_delete(vault, task_id):
         args={"task_id": task_id},
         rar_type=RAR_TYPE,
         approver_id="alice",
+        binding_message=f"Delete task {task_id}?",
         secret=USER_SECRET,
     )
     return vault.mint(signed)

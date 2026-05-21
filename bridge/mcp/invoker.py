@@ -10,11 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from bridge.auth.hmac import CallerIdentity
 from bridge.tools import ToolSpec
 from bridge.core.dispatcher import (
     ApprovalRequired,
     CommandError,
     Dispatcher,
+    Unauthorized,
 )
 from bridge.core.output import error_human, to_human
 
@@ -26,6 +28,7 @@ class ToolResult:
     content: str
     approval_required: bool = False
     approval_payload: dict | None = None   # {"command": str, "args": dict[str,str]}
+    unauthorized: bool = False             # bearer scopes don't cover this tool
 
 
 class ToolInvoker(Protocol):
@@ -34,6 +37,8 @@ class ToolInvoker(Protocol):
         spec: ToolSpec,
         args: dict,
         approval_token: str | None = None,
+        *,
+        caller: CallerIdentity | None = None,
     ) -> ToolResult: ...
 
 
@@ -41,9 +46,9 @@ class InProcessInvoker:
     """The production invoker: calls `Dispatcher.execute()` directly.
 
     No subprocess, no argv, no stdout parsing. The Dispatcher returns a
-    structured outcome (CommandSuccess | CommandError | ApprovalRequired)
-    which we adapt to a ToolResult, formatting items / errors as the
-    same human-readable text the CLI emits.
+    structured outcome (CommandSuccess | CommandError | ApprovalRequired
+    | Unauthorized) which we adapt to a ToolResult, formatting items /
+    errors as the same human-readable text the CLI emits.
     """
 
     def __init__(self, dispatcher: Dispatcher) -> None:
@@ -57,6 +62,8 @@ class InProcessInvoker:
         spec: ToolSpec,
         args: dict,
         approval_token: str | None = None,
+        *,
+        caller: CallerIdentity | None = None,
     ) -> ToolResult:
         if spec.in_process:
             raise ValueError(f"{spec.name} is an in-process tool; use a node dispatcher")
@@ -67,7 +74,16 @@ class InProcessInvoker:
             command_name=spec.cli_name,
             kwargs=args,
             approval_token=approval_token,
+            caller=caller,
         )
+
+        if isinstance(outcome, Unauthorized):
+            missing = sorted(set(outcome.required_scopes) - set(outcome.caller_scopes))
+            content = (
+                f"unauthorized: tool {spec.name!r} requires scope(s) {missing}; "
+                f"caller has {list(outcome.caller_scopes)}"
+            )
+            return ToolResult(ok=False, content=content, unauthorized=True)
 
         if isinstance(outcome, ApprovalRequired):
             return ToolResult(

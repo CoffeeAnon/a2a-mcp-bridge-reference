@@ -129,9 +129,11 @@ def _build_vault(tier: int):
 def _sign_and_mint(vault, command: str, args: dict, approver_id: str = "alice"):
     """Step-narrated sign-then-mint."""
     _step(f"Human reviews proposed action and signs RAR payload (approver={approver_id})")
+    binding_message = f"{command} {args}"
     signed = sign_authorization_details(
         command=command, args=args, rar_type=RAR_TYPE,
-        approver_id=approver_id, secret=USER_SECRET,
+        approver_id=approver_id, binding_message=binding_message,
+        secret=USER_SECRET,
     )
     _step("Bridge presents signed payload to Vault for minting")
     minted = vault.mint(signed)
@@ -225,7 +227,7 @@ def scenario_translation_round_trip() -> bool:
 
     Walks the (authorization_details, context_id, binding_message) tuple
     through both translation directions and asserts the round-trip
-    preserves the load-bearing properties. Companion to the Pattern-2
+    preserves the round-trip properties. Companion to the Pattern-2
     scenarios above; together they cover both of the bridge's
     publishable patterns.
     """
@@ -264,6 +266,7 @@ def scenario_translation_round_trip() -> bool:
         args=a2a_event.authorization_details["args"],
         rar_type=a2a_event.authorization_details["type"],
         approver_id="alice@example.com",
+        binding_message=a2a_event.binding_message,
         secret=USER_SECRET,
     )
 
@@ -318,14 +321,15 @@ def scenario_vault_key_isolation() -> bool:
         user_signing_secret=USER_SECRET, mint_secret=MINT_SECRET, expected_rar_type=RAR_TYPE,
     )
     other_vault = OAuthVault(
-        user_signing_secret=USER_SECRET, mint_secret="DIFFERENT-VAULT-MINT-SECRET-32B", expected_rar_type=RAR_TYPE,
+        user_signing_secret=USER_SECRET, mint_secret="DIFFERENT-VAULT-MINT-SECRET-32-BYTES-PAD", expected_rar_type=RAR_TYPE,
     )
     dispatcher = Dispatcher(client=store, vault=legit_vault)
 
     _step("A different Vault instance (different mint_secret) signs a token for this action")
     signed = sign_authorization_details(
         command="delete-task", args={"task_id": task_a}, rar_type=RAR_TYPE,
-        approver_id="alice", secret=USER_SECRET,
+        approver_id="alice", binding_message=f"Delete task {task_a}?",
+        secret=USER_SECRET,
     )
     other_credential = other_vault.mint(signed)
     _ok("Foreign-Vault mint produced a structurally-valid JWT")

@@ -34,7 +34,7 @@ from bridge.vault import InProcessVault  # noqa: E402
 import bridge.commands  # noqa: F401, E402
 
 
-SECRET = "mcp-server-test-secret-16b-min"
+SECRET = "mcp-server-test-secret-32bytes-minimum"
 
 
 @pytest.fixture

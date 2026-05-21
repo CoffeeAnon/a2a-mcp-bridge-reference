@@ -24,8 +24,8 @@ from bridge.vault import (
 )
 
 
-USER_SECRET = "test-user-secret-16bytes-min"
-MINT_SECRET = "test-mint-secret-16bytes-min"
+USER_SECRET = "test-user-secret-32bytes-minimum-pad"
+MINT_SECRET = "test-mint-secret-32bytes-minimum-pad"
 ISSUER = "https://vault.reference.invalid"
 AUDIENCE = "bridge-resource-server"
 RAR_TYPE = "tasktracker_task_action"
@@ -56,10 +56,10 @@ def separated_setup():
     return client, vault, rs, dispatcher, promised["task_id"], bystander["task_id"]
 
 
-def _mint(vault, command, args, secret=USER_SECRET):
+def _mint(vault, command, args, secret=USER_SECRET, binding_message="Delete task ?"):
     signed = sign_authorization_details(
         command=command, args=args, rar_type=RAR_TYPE,
-        approver_id="alice", secret=secret,
+        approver_id="alice", binding_message=binding_message, secret=secret,
     )
     return vault.mint(signed)
 
@@ -88,10 +88,48 @@ def test_layer1_vault_refuses_bad_signature(separated_setup):
     from bridge.vault.interface import SignatureMismatch
     signed = sign_authorization_details(
         command="delete-task", args={"task_id": promised}, rar_type=RAR_TYPE,
-        approver_id="alice", secret="WRONG-USER-SECRET",
+        approver_id="alice", binding_message="Delete task t-42?",
+        secret="WRONG-USER-SECRET-PADDED-32-bytes-fill",
     )
     with pytest.raises(SignatureMismatch):
         vault.mint(signed)
+
+
+def test_vault_rejects_binding_message_swap(separated_setup):
+    """Binding-message tampering: ``binding_message`` is in the canonical bytes.
+
+    Threat: a compromised bridge renders one binding_message to the user
+    ("Delete the temp file") but constructs a SignedAuthorizationDetails
+    with a different binding_message ("Delete production DB") before
+    handing it to the Vault — same args, same command, the user thinks
+    they approved the cosmetic action.
+
+    Defence: the HMAC the user computed is over the canonical bytes that
+    include the message the user actually saw. If the bridge swaps the
+    binding_message, the canonical bytes the Vault recomputes differ
+    from the bytes the user signed, and the Vault refuses to mint with
+    SignatureMismatch.
+    """
+    from bridge.vault import SignedAuthorizationDetails
+    from bridge.vault.interface import SignatureMismatch
+
+    _, vault, _, _, promised, _ = separated_setup
+    # User signs over message they actually saw.
+    benign = sign_authorization_details(
+        command="delete-task", args={"task_id": promised}, rar_type=RAR_TYPE,
+        approver_id="alice", binding_message="Delete the temp file (low impact).",
+        secret=USER_SECRET,
+    )
+    # Compromised bridge tries to present a different binding_message to the Vault
+    # while keeping everything else (including the user's signature) intact.
+    tampered = SignedAuthorizationDetails(
+        command=benign.command, args=benign.args, rar_type=benign.rar_type,
+        exp=benign.exp, approver_id=benign.approver_id,
+        binding_message="Delete the production database.",
+        signature=benign.signature,
+    )
+    with pytest.raises(SignatureMismatch):
+        vault.mint(tampered)
 
 
 # ── Layer 2: bridge cannot alter the minted claim ──────────────────────────
@@ -197,7 +235,7 @@ def test_rs_rejects_token_signed_with_different_mint_secret():
     # mints under. In production RS256, this is the analogous
     # mismatch between holding the wrong public key.
     this_rs = JwtResourceServer(
-        verification_secret="rs-has-a-different-secret-16b",
+        verification_secret="rs-has-a-different-secret-32bytes-pad",
         expected_issuer=ISSUER,
         expected_audience=AUDIENCE,
         expected_rar_type=RAR_TYPE,

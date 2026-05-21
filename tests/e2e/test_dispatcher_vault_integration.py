@@ -21,8 +21,8 @@ from bridge.vault import (
 )
 
 
-USER_SECRET = "user-secret-16bytes-minimum"
-MINT_SECRET = "mint-secret-16bytes-minimum"
+USER_SECRET = "user-secret-32bytes-minimum-padding-x"
+MINT_SECRET = "mint-secret-32bytes-minimum-padding-x"
 RAR_TYPE = "tasktracker_task_action"
 
 
@@ -32,6 +32,7 @@ def _signed(command, args, secret=USER_SECRET):
         args=args,
         rar_type=RAR_TYPE,
         approver_id="alice",
+        binding_message=f"{command} {args}",
         secret=secret,
     )
 

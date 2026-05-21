@@ -1,5 +1,8 @@
 # A2A↔MCP Bridge Reference
 
+> [!WARNING]
+> **Reference implementation only, not a production template.** This codebase exists to illustrate the RAR / Vault / HITL patterns and the A2A↔MCP translation shape. It deliberately omits standard substrate concerns (consent-server authentication, CSRF protection, durable session/token storage, OWASP-class hardening) so the architectural mechanics stay readable. Copying this repo as-is into production would ship something insecure. See §"Limitations and non-goals" and `SECURITY.md` for the explicit list of what is intentionally out of scope.
+
 A reference implementation of a **stateful, HITL-aware, parameter-bound** bridge between [A2A](https://a2a-protocol.org) and [MCP](https://modelcontextprotocol.io), the two emerging protocols for agent-to-agent and LLM-host-to-tool communication.
 
 The design centres on two patterns:
@@ -14,6 +17,22 @@ The reference ships two tiers behind a single `Vault` Protocol:
 
 ---
 
+## What this reference is — and what it isn't
+
+This repo is a reference architecture and executable demo of the building blocks, not a secure reference implementation. The architectural shape (protocol translation, three-layer enforcement, parameter-bound credentials, canonical-form signing contract) is exercised through real code. Several properties the contract names are framing-only in the bundled demo and must be added before production use.
+
+What's actually demonstrated in code:
+
+- The `Vault` Protocol with two interchangeable implementations (Tier 1 in-process, Tier 2 OAuth-shape with separated RS).
+- Signature verification, JWT algorithm pinning, canonical-bytes contract with cross-language fixtures, independent RS validation, parameter-drift rejection at three layers.
+- The A2A↔MCP translation in pure data, the URL-mode consent surface, and the MCP `tools/list` + `tools/call` (read-only) wiring.
+- Dispatcher-level scope enforcement: a caller's bearer scopes are checked against the tool's `required_scopes` before HITL routing, so a `tasks.read` bearer cannot execute non-HITL writes (`create_task`, `update_task`) or even reach the HITL gate for `delete_task`. See `tests/e2e/test_scope_enforcement.py`.
+- `binding_message` is part of the signed canonical bytes (CANONICAL.md §`binding_message`). A bridge that renders one summary on the consent page but signs different bytes fails Vault verification; see `tests/e2e/test_three_layer_enforcement.py::test_vault_rejects_binding_message_swap`.
+
+For the explicit list of what the demo intentionally leaves out and what a production port must still close, see §"Limitations and non-goals" below and `SECURITY.md`.
+
+---
+
 ## Reading order
 
 The code is organised so it can be read in five short passes. Each pass builds on the previous one and should take five to fifteen minutes.
@@ -24,7 +43,7 @@ The code is organised so it can be read in five short passes. Each pass builds o
 
 **3. The third enforcement layer.** `bridge/rs/jwt_resource_server.py` is the Tier-2 resource server. It performs its own JWT verification, its own `iss`/`aud`/`exp` checks, its own consumed-`jti` tracking, and its own binding check between the live request and the JWT's `authorization_details`, all independent of the Vault.
 
-**4. The HITL gate and the protocol surfaces.** `bridge/core/dispatcher.py` holds the HITL gate - it accepts a `Vault` or a `ResourceServer` but never both, and routes execution accordingly. The Tier-2 path is a four-line pass-through to the RS, which is what makes Layer 2 of the three-layer architecture structural. From there, `bridge/translation/a2a_mcp.py` is Pattern 1 in pure data (A2A `auth_required` ↔ MCP elicitation, preserving `context_id` continuity and `authorization_details` byte-identity), `bridge/consent/url_mode.py` is the URL-mode consent server, and `bridge/mcp/server.py` is the MCP HTTP surface that routes `tools/call` into the same dispatcher the CLI uses.
+**4. The HITL gate and the protocol surfaces.** `bridge/core/dispatcher.py` holds the HITL gate. It accepts a `Vault` or a `ResourceServer` but never both, and routes execution accordingly. The Tier-2 path is a four-line pass-through to the RS, which is what makes Layer 2 of the three-layer architecture structural. From there, `bridge/translation/a2a_mcp.py` is Pattern 1 in pure data (A2A `auth_required` ↔ MCP elicitation, preserving `context_id` continuity and `authorization_details` byte-identity), `bridge/consent/url_mode.py` is the URL-mode consent server, and `bridge/mcp/server.py` is the MCP HTTP surface that routes `tools/call` into the same dispatcher the CLI uses.
 
 **5. Run something.** `bridge/walkthrough.py` is the narrated end-to-end flow using every component together. Run it with `bridge walkthrough --tier 2` for a step-by-step trace of the full Tier-2 path.
 
@@ -34,9 +53,9 @@ If you plan to write a non-Python signer, `bridge/vault/CANONICAL.md` is the byt
 
 Three tests carry most of the design's weight and are short enough to read directly:
 
-- `tests/e2e/test_three_layer_enforcement.py` exercises Layer 1 (Vault verify-before-mint) and Layer 3 (RS independent verify) through real code. Layer 2, the dispatcher's structural pass-through, is asserted by code inspection - what this file tests is Layer 3 catching mutation if it occurred, the defence-in-depth fallback.
+- `tests/e2e/test_three_layer_enforcement.py` exercises Layer 1 (Vault verify-before-mint) and Layer 3 (RS independent verify) through code. Layer 2, the dispatcher's structural pass-through, is asserted by code inspection - what this file tests is Layer 3 catching mutation if it occurred, the defence-in-depth fallback.
 - `tests/e2e/test_dispatcher_vault_integration.py::test_tier2_attacker_without_user_secret_cannot_forge_a_new_signature` exercises the production-shape Zero-Trust property: an attacker without the user signing key cannot forge a signature for a new action. The HS256 demo configuration is materially weaker than the WebAuthn-bound production shape, and the docs say so where it matters.
-- `tests/e2e/test_mcp_hitl_building_blocks.py` exercises the translation + consent + Vault + RS composition for the MCP HITL flow. It does not drive the MCP server's `tools/call` → `elicitation/create` wire (that emission is the documented next step - see §"Limitations"), but it shows that the building blocks compose correctly.
+- `tests/e2e/test_mcp_hitl_building_blocks.py` exercises the translation + consent + Vault + RS composition for the MCP HITL flow. It does not drive the MCP server's `tools/call` → `elicitation/create` wire (that emission is documented as a next step in §"Limitations and non-goals"), but it shows that the building blocks compose correctly.
 
 ---
 
@@ -44,21 +63,21 @@ Three tests carry most of the design's weight and are short enough to read direc
 
 ```
 bridge/
-├── vault/             # Pattern 2 — Vault Protocol + InProcessVault + OAuthVault
+├── vault/             # Pattern 2: Vault Protocol + InProcessVault + OAuthVault
 │   └── CANONICAL.md     ← cross-language signer spec
-├── rs/                # Pattern 2 — JwtResourceServer (third enforcement layer)
-├── translation/       # Pattern 1 — A2A ↔ MCP elicitation translation (pure dataclasses)
+├── rs/                # Pattern 2: JwtResourceServer (third enforcement layer)
+├── translation/       # Pattern 1: A2A ↔ MCP elicitation translation (pure dataclasses)
 ├── consent/           # URL-mode elicitation consent server (Starlette)
 │   ├── url_mode.py      ← three endpoints: render / submit / result
 │   └── demo_signer.py   ← server-side stand-in for client-side WebAuthn signing
 ├── mcp/               # MCP streamable-HTTP surface (bearer-auth, tools/list, tools/call)
-│   ├── server.py        ← build_mcp_app() — the ASGI mount
+│   ├── server.py        ← build_mcp_app(): the ASGI mount
 │   ├── invoker.py         ← Dispatcher adapter for MCP tool calls
 │   └── auth.py            ← bearer-token verification
 ├── core/              # Dispatcher (HITL gate), in-memory task store, command registry
-├── commands/          # Task-tracker example commands — list/get/create/update/delete
+├── commands/          # Task-tracker example commands: list/get/create/update/delete
 ├── auth/              # Shared HMAC bearer-token store (TokenStore + CallerIdentity)
-├── tools.py           # ToolSpec registry — declarative tool metadata
+├── tools.py           # ToolSpec registry: declarative tool metadata
 ├── audit.py           # Append-only SQLite audit log
 ├── cli.py             # `bridge demo` smoke-test runner
 └── walkthrough.py     # `bridge walkthrough` architecture-sequence simulator
@@ -69,7 +88,7 @@ tests/
 └── protocol/          # MCP server (auth gate), consent server (URL-mode endpoints), read filter
 ```
 
-The example domain is deliberately generic. Replace `bridge/commands/*.py` and update `bridge/tools.py` to point at your own domain - the Vault, RS, dispatcher, MCP surface, and CLI all stay the same.
+The example domain is deliberately generic. Replace `bridge/commands/*.py` and update `bridge/tools.py` to point at your own domain. The Vault, RS, dispatcher, MCP surface, and CLI all stay the same.
 
 ---
 
@@ -114,7 +133,7 @@ bridge walkthrough --tier 2 --pause   # interactive: Enter between steps
 bridge walkthrough --tier 1           # the Tier-1 in-process variant
 ```
 
-The walkthrough is behaviour-accurate but transport-simulated. The Vault, dispatcher, resource server, and translation calls are real - the HTTP/SSE envelopes are printed for narration rather than sent over real sockets.
+The walkthrough is behaviour-accurate but transport-simulated. The Vault, dispatcher, resource server, and translation calls run for real - the HTTP/SSE envelopes are printed for narration rather than sent over sockets.
 
 Without an install you can run it directly from a checkout:
 
@@ -139,7 +158,7 @@ Key invariants the suite enforces:
 - **Single-use** (with documented carve-out): a credential consumed once cannot be consumed again, in either Vault or RS state. *Carve-out:* single-use is enforced at consume (per-jti), not at mint (per-signed-payload). A captured signed payload can produce multiple distinct credentials for the *same* `(command, args)` until the signed-payload's `exp`. See §"Limitations".
 - **Cross-Vault key isolation**: a JWT minted by one OAuthVault instance does not validate at another (different `mint_secret`).
 - **Three-layer enforcement** (`tests/e2e/test_three_layer_enforcement.py`): each layer (Vault signature verify-before-mint, bridge unable to alter, RS independent verify+binding+single-use) exercised through real code.
-- **MCP HITL building blocks** (`tests/e2e/test_mcp_hitl_building_blocks.py`): the translation + consent + Vault + RS composition for the MCP HITL flow. Does NOT exercise the MCP server's `tools/call` → `elicitation/create` wire - that's documented as the unbundled next step in §"Limitations". What's tested: A2A event → translation → consent page → user approves → bridge polls → translation back → Vault.mint → RS.execute → target deleted, bystander survives.
+- **MCP HITL building blocks** (`tests/e2e/test_mcp_hitl_building_blocks.py`): the translation + consent + Vault + RS composition for the MCP HITL flow. Does NOT exercise the MCP server's `tools/call` → `elicitation/create` wire - that's documented as the unbundled next step in §"Limitations and non-goals". What's tested: A2A event → translation → consent page → user approves → bridge polls → translation back → Vault.mint → RS.execute → target deleted, bystander survives.
 - **JWT algorithm pinning**: `alg=none`, `alg=RS256` rejected before HMAC verify (forecloses the RS256↔HS256 key-confusion family).
 - **`aud` claim shape compliance** (RFC 7519): both scalar `aud` and array-of-strings `aud` accepted at the RS. Production AS implementations (Keycloak, Authlete) commonly emit array shape - the reference `OAuthVault` mints scalar.
 - **Signed-payload TTL bound at mint**: `OAuthVault` rejects (`PayloadDriftAtMint`) a signed payload whose `exp` exceeds `max_signed_payload_ttl_seconds` (default 600s). A misbehaving or compromised signer cannot mint long-lived credentials by inflating `exp`.
@@ -151,18 +170,41 @@ Key invariants the suite enforces:
 
 ---
 
-## Limitations of the reference implementation
+## Limitations and non-goals
 
-Each item below also appears in the relevant module docstrings and in the `docs/architecture.md` threat model.
+Two kinds of limit: things the reference will never attempt (substrate concerns out of scope), and things the architecture commits to but the bundled demo's substrate doesn't fully deliver. A production port replaces the substrate and closes the gaps.
+
+### Non-goals (deliberate scope choices)
+
+The reference will not attempt these even at maturity. Each belongs to substrate concerns that would obscure the patterns the project exists to teach.
+
+- **Production-grade consent surface.** No user authentication on the consent page, no CSRF tokens on `POST /consent/<id>/submit`, no session hardening, no rate limiting. The consent server is a minimal Starlette mount that illustrates the URL-mode elicitation shape. A production deployment authenticates the user (OIDC / SAML), protects the form (CSRF), and rate-limits the endpoint.
+- **Durable storage substrate.** The token store is a JSON file with non-atomic load-modify-save. The audit log is SQLite without field-level encryption or scrubbing. The consumed-jti and `_issued` sets are in-process Python sets. Production swaps in durable, transactional, encrypted storage as a substrate change with no architectural impact.
+- **Multi-tenant federation.** Single AS, single RS, single bridge. Federated deployments are a deployment-topology concern.
+- **DPoP / sender-constrained tokens** (RFC 9449). Strongly recommended for production; not modelled here.
+- **Untrusted MCP host hardening.** The bridge trusts the MCP host to route elicitation responses faithfully. Multi-replica or shared-host deployments must replace the elicitation-ID carrier with a signed token. See `bridge.translation.a2a_mcp` and the "Untrusted MCP host" row in `docs/architecture.md`.
+- **Audit-log PII handling.** `tool_args` and `result_snippet` are stored as-is. Production must add field-level encryption or automated scrubbing for sensitive arguments.
+
+### Known production gaps
+
+Properties the architecture commits to but the bundled demo stops short of fully delivering. Each is also called out in the relevant module docstrings and in the `docs/architecture.md` threat model.
 
 - **HS256 reference** uses a shared symmetric secret between Vault and RS. In production the Vault would sign with a private key and the RS would verify with the corresponding public key (RS256/ES256 + JWKS). The reference's separated RS demonstrates the architectural property - the symmetric-key limitation means RS compromise yields mint capability in this configuration.
-- **Demo-mode signer co-location**: `bridge.consent.demo_signer` produces the user signature on the server side because the demo cannot launch a separate user-key custodian. A production Tier-2 deployment must move signing client-side (WebAuthn / Passkey) and never hold the user signing key in the bridge process.
-- **In-memory consumed-jti set**: both `OAuthVault` and `JwtResourceServer` track single-use state in process memory. A Vault/RS restart inside the JWT TTL discards the record. Production deployments must back this with a durable TTL-aware store (sqlite, Redis). Tier 1 is structurally closed against this because `_issued` is also process-local (post-restart credentials fail at `SignatureMismatch`, not as replays).
-- **Re-mint within signed-payload TTL**: an attacker holding a captured signed payload can mint multiple credentials for the *same* `(command, args)` until the 5-minute TTL expires. Reference enforces "fresh consent per action shape", not "fresh consent per execution". For destructive actions where double-execution matters, the RS must add per-action idempotency or the Vault must track consumed signed-payload signatures at mint time.
-- **MCP elicitation emission is not bundled**: the reference includes the `tools/list` + `tools/call` (read-only) wiring and the URL-mode consent server, but the *server-side emission* of an MCP `elicitation/create` event on a HITL-gated tool call is not yet implemented in `bridge/mcp/server.py`. The building-blocks integration test (`tests/e2e/test_mcp_hitl_building_blocks.py`) demonstrates the translation, consent, Vault, and RS composition by hand. Wiring the elicitation primitive into the MCP server is the natural next step.
+- **Demo-mode signer co-location.** `bridge.consent.demo_signer` produces the user signature on the server side because the demo cannot launch a separate user-key custodian, signing directly over the stored `ProposedAction` rather than accepting a client-submitted payload. A production Tier-2 deployment must (a) move signing client-side (WebAuthn / Passkey) and never hold the user signing key in the bridge process, and (b) when the client submits the signed payload back, verify that the payload's `(command, args, rar_type, approver_id)` matches the stored `ProposedAction` before forwarding to `Vault.mint`. The demo's server-side signing skips this step because it cannot drift by construction. The production shape can drift and must check.
+- **In-memory consumed-jti set.** Both `OAuthVault` and `JwtResourceServer` track single-use state in process memory. A Vault/RS restart inside the JWT TTL discards the record. Production deployments must back this with a durable TTL-aware store (sqlite, Redis). Tier 1 is structurally closed against this because `_issued` is also process-local (post-restart credentials fail at `SignatureMismatch`, not as replays).
+- **Re-mint within signed-payload TTL.** An attacker holding a captured signed payload can mint multiple credentials for the same `(command, args)` until the 5-minute TTL expires. Reference enforces "fresh consent per action shape", not "fresh consent per execution". For destructive actions where double-execution matters, the RS must add per-action idempotency or the Vault must track consumed signed-payload signatures at mint time.
+- **No approver-authorization policy.** `PolicyDenied` is defined as a typed exception but never raised by either Vault. `approver_id` is carried through the signed payload and JWT `sub` for attribution, not for enforcement. A production AS would consult an RBAC/ABAC policy here.
+- **MCP bearer auth is authentication-only at the transport.** `bridge/mcp/auth.py` constructs a `CallerIdentity` from a valid bearer (carrying the scopes the `TokenStore` issued the token with). Scope-vs-tool enforcement happens at the dispatcher (`bridge/core/dispatcher.py`, exercised by `tests/e2e/test_scope_enforcement.py`), not at the transport. Any non-MCP surface that bypasses the dispatcher (e.g. a future direct A2A executor) must apply the same `required_scopes` check itself.
+- **MCP elicitation emission is not bundled.** The reference includes the `tools/list` + `tools/call` (read-only) wiring and the URL-mode consent server, but server-side emission of an MCP `elicitation/create` event on a HITL-gated tool call is not yet implemented in `bridge/mcp/server.py`. The building-blocks integration test (`tests/e2e/test_mcp_hitl_building_blocks.py`) demonstrates the translation, consent, Vault, and RS composition by hand. Wiring the elicitation primitive into the MCP server is the natural next step.
 
 ---
 
 ## License
 
-Apache-2.0.
+Apache-2.0. See [LICENSE](LICENSE).
+
+---
+
+## A note on AI usage
+
+This repository was built with AI assistance for development. Planning, review, and testing were performed manually by the maintainer - the AI did not review or sign off on its own output.

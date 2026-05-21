@@ -3,32 +3,50 @@
 Pure logic: no printing, no exit codes. Used by both the agent's in-process
 invoker and any CLI wrapper that wants to call commands directly.
 
-The HITL gate is the single load-bearing primitive: when a command's class
-declares ``hitl=True``, dispatch refuses to execute without a valid
-credential. Validation can happen in one of two places:
+Two enforcement primitives live here, and they are orthogonal:
 
-  - **Vault-backed (Tier 1 in-process):** dispatcher calls
-    ``Vault.consume(credential, command, args)``. The Vault holds the
-    consumed-jti state. Used when the resource server is not separated
-    from the dispatcher (Tier 1 InProcessVault, or Tier 2 OAuthVault
-    when the deployment co-locates them).
+  1. **Scope enforcement.** Before any execution path, the dispatcher
+     checks the caller's bearer-token scopes against the tool's
+     ``required_scopes``. A ``tasks.read`` bearer attempting
+     ``create_task`` is refused at this point with an ``Unauthorized``
+     outcome, *before* HITL routing. The motivating concern: a caller
+     whose token does not carry write scope must not be able to
+     execute non-HITL writes just because they aren't gated by an
+     approval flow. See ``SECURITY.md`` for the discussion.
 
-  - **RS-backed (Tier 2 with separated RS):** dispatcher forwards
-    ``(command, args, credential)`` to ``ResourceServer.execute``, which
-    does its own JWT verify + binding check + single-use enforcement
-    against the RS's own state, then executes. This is the deployment
-    shape the "three independent enforcement layers" claim
-    requires.
+  2. **HITL gate.** When a command's class declares ``hitl=True``,
+     dispatch refuses to execute without a valid credential.
+     Validation can happen in one of two places:
+
+       - **Vault-backed (Tier 1 in-process):** dispatcher calls
+         ``Vault.consume(credential, command, args)``. The Vault
+         holds the consumed-jti state.
+
+       - **RS-backed (Tier 2 with separated RS):** dispatcher forwards
+         ``(command, args, credential)`` to ``ResourceServer.execute``,
+         which does its own JWT verify + binding check + single-use
+         enforcement against the RS's own state, then executes. This
+         is the deployment shape the "three independent enforcement
+         layers" claim requires.
 
 A ``Dispatcher`` is constructed with exactly one of ``vault=`` or
 ``resource_server=``; passing neither is a programming error.
+
+The ``caller`` parameter on ``execute`` is the bearer-attributed
+identity from the surface (MCP, A2A). When ``caller is None`` the
+dispatcher is being invoked from a trusted in-process context (CLI,
+walkthrough, tests with no surface) and scope enforcement is bypassed
+— this is intentional and documented; an externally-reachable
+surface must always pass a ``caller``.
 """
 from dataclasses import dataclass
 from typing import Any
 
+from bridge.auth.hmac import CallerIdentity
 from bridge.core.client import ApiError, BridgeClient
 from bridge.core.registry import REGISTRY
 from bridge.rs import JwtResourceServer, RsError, RsRejected, RsSuccess
+from bridge.tools import SPECS_BY_CLI_NAME
 from bridge.vault import Vault, VaultError
 
 
@@ -64,7 +82,23 @@ class ApprovalRequired:
     reason: str | None = None
 
 
-CommandOutcome = CommandSuccess | CommandError | ApprovalRequired
+@dataclass(frozen=True)
+class Unauthorized:
+    """Returned when the caller's bearer scopes do not include the tool's
+    ``required_scopes``. Distinct from ``ApprovalRequired``: scope failure
+    means "this caller is not allowed to attempt this tool at all";
+    approval failure means "this destructive attempt needs a human signed
+    consent it does not have." A reader looking at audit rows must be able
+    to tell the two apart.
+    """
+    command: str
+    args: dict
+    required_scopes: tuple[str, ...]
+    caller_scopes: tuple[str, ...]
+    caller_id: str | None = None
+
+
+CommandOutcome = CommandSuccess | CommandError | ApprovalRequired | Unauthorized
 
 
 _RESERVED_META_KEYS = {"count", "status", "command"}
@@ -107,8 +141,18 @@ class Dispatcher:
         command_name: str,
         kwargs: dict,
         approval_token: str | None = None,
+        *,
+        caller: CallerIdentity | None = None,
     ) -> CommandOutcome:
-        """Run a command and return a structured outcome."""
+        """Run a command and return a structured outcome.
+
+        ``caller`` is the bearer-attributed identity. When provided, scope
+        enforcement runs against the tool's ``required_scopes`` *before*
+        HITL routing. When ``None``, scope enforcement is bypassed and the
+        dispatcher assumes a trusted in-process context (CLI, walkthrough,
+        test harness). Externally-reachable surfaces (MCP, A2A) MUST pass
+        a non-None ``caller``.
+        """
         cmd_cls = REGISTRY.get(command_name)
         if cmd_cls is None:
             return CommandError(
@@ -123,6 +167,20 @@ class Dispatcher:
                 f"Command kwargs collide with reserved meta keys {sorted(collision)}; "
                 f"rename in your tool spec"
             )
+
+        # Scope enforcement runs before HITL routing so a caller
+        # without write scope cannot execute non-HITL writes.
+        spec = SPECS_BY_CLI_NAME.get(command_name)
+        if caller is not None and spec is not None and spec.required_scopes:
+            missing = [s for s in spec.required_scopes if s not in caller.scopes]
+            if missing:
+                return Unauthorized(
+                    command=command_name,
+                    args=dict(kwargs),
+                    required_scopes=tuple(spec.required_scopes),
+                    caller_scopes=tuple(sorted(caller.scopes)),
+                    caller_id=caller.caller_id,
+                )
 
         if cmd_cls.hitl:
             if not approval_token:

@@ -24,8 +24,8 @@ from bridge.vault import (
 )
 
 
-USER_SECRET = "user-side-signing-secret-16b"
-MINT_SECRET = "vault-mint-secret-16bytes-yes"
+USER_SECRET = "user-side-signing-secret-32bytes-pad"
+MINT_SECRET = "vault-mint-secret-32bytes-padding-x"
 RAR_TYPE = "tasktracker_task_action"
 
 
@@ -38,12 +38,13 @@ def vault():
     )
 
 
-def _signed(command="delete-task", args=None, secret=USER_SECRET):
+def _signed(command="delete-task", args=None, secret=USER_SECRET, binding_message="Delete task t-42?"):
     return sign_authorization_details(
         command=command,
         args=args or {"task_id": "t-42"},
         rar_type=RAR_TYPE,
         approver_id="alice",
+        binding_message=binding_message,
         secret=secret,
     )
 
@@ -137,8 +138,8 @@ def test_consume_rejects_tampered_jwt(vault):
 
 def test_consume_rejects_jwt_from_a_different_vault():
     """A JWT minted by one Vault must not validate against another."""
-    vault_a = OAuthVault(user_signing_secret=USER_SECRET, mint_secret="vault-A-16bytes-minimum")
-    vault_b = OAuthVault(user_signing_secret=USER_SECRET, mint_secret="vault-B-16bytes-minimum")
+    vault_a = OAuthVault(user_signing_secret=USER_SECRET, mint_secret="vault-A-mint-secret-32bytes-padding")
+    vault_b = OAuthVault(user_signing_secret=USER_SECRET, mint_secret="vault-B-mint-secret-32bytes-padding")
     minted = vault_a.mint(_signed())
     with pytest.raises(SignatureMismatch):
         vault_b.consume(minted.credential, "delete-task", {"task_id": "t-42"})
@@ -265,7 +266,8 @@ def test_mint_rejects_expired_signed_payload(vault):
     not silently minted into an immediately-stale JWT."""
     stale = sign_authorization_details(
         command="delete-task", args={"task_id": "t-42"}, rar_type=RAR_TYPE,
-        approver_id="alice", secret=USER_SECRET, ttl_seconds=-60,
+        approver_id="alice", binding_message="Delete task t-42?",
+        secret=USER_SECRET, ttl_seconds=-60,
     )
     with pytest.raises(CredentialExpired):
         vault.mint(stale)
@@ -283,7 +285,8 @@ def test_mint_rejects_overlong_ttl():
     # Sign with a 10x-over-policy TTL.
     signed = sign_authorization_details(
         command="delete-task", args={"task_id": "t-42"}, rar_type=RAR_TYPE,
-        approver_id="alice", secret=USER_SECRET, ttl_seconds=3000,
+        approver_id="alice", binding_message="Delete task t-42?",
+        secret=USER_SECRET, ttl_seconds=3000,
     )
     with pytest.raises(PayloadDriftAtMint, match="exceeds Vault max_ttl"):
         vault.mint(signed)
@@ -299,7 +302,8 @@ def test_mint_accepts_within_ttl_bounds():
     )
     signed = sign_authorization_details(
         command="delete-task", args={"task_id": "t-42"}, rar_type=RAR_TYPE,
-        approver_id="alice", secret=USER_SECRET, ttl_seconds=300,
+        approver_id="alice", binding_message="Delete task t-42?",
+        secret=USER_SECRET, ttl_seconds=300,
     )
     # Should not raise.
     minted = vault.mint(signed)
@@ -312,6 +316,7 @@ def test_consume_rejects_expired(vault, monkeypatch):
         args={"task_id": "t-42"},
         rar_type=RAR_TYPE,
         approver_id="alice",
+        binding_message="Delete task t-42?",
         secret=USER_SECRET,
         ttl_seconds=1,
     )

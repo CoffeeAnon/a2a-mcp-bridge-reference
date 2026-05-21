@@ -95,7 +95,7 @@ def build_mcp_app(
         actor = f"mcp:{caller.display_name}" if caller else "mcp:unknown"
         thread_id = f"mcp:{caller.caller_id}" if caller else "mcp:anon"
 
-        result = invoker.invoke(spec, arguments)
+        result = invoker.invoke(spec, arguments, caller=caller)
         full_content = result.content or ""
         snippet = full_content[:500]
 

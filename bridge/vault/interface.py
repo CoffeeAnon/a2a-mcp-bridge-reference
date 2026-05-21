@@ -42,6 +42,10 @@ class VaultError(Exception):
       - ``CredentialExpired``        → time bound exceeded
       - ``CredentialReplay``         → single-use violation
       - ``PolicyDenied``             → identity lacks the requested permission
+                                       (reserved for production AS-side policy;
+                                       not raised by the in-process or HS256 demos —
+                                       ``approver_id`` is carried for attribution,
+                                       not enforced as authorization policy)
 
     The dispatcher treats every ``VaultError`` uniformly as "approval required"
     when surfacing to callers, but the typed exception is preserved on the
@@ -84,7 +88,16 @@ class PayloadDriftAtMint(VaultError):
 
 class PolicyDenied(VaultError):
     """Signature and payload are valid but Vault policy refuses to mint
-    (e.g., the approver's identity lacks the requested permission)."""
+    (e.g., the approver's identity lacks the requested permission).
+
+    Reserved for production AS-side authorization decisions. **Neither the
+    in-process Vault nor the HS256 OAuthVault demo raises this**: they treat
+    ``approver_id`` as an attribution field carried through to the audit log
+    and the JWT ``sub`` claim, not as input to an RBAC/ABAC decision. A
+    production AS swapped in behind the ``Vault`` Protocol (Keycloak,
+    Authlete, Auth0, Curity, etc.) is where this exception would actually
+    surface.
+    """
 
 
 class CredentialReplay(VaultError):
@@ -111,14 +124,24 @@ class SignedAuthorizationDetails:
                              cross-language byte-stability; see
                              ``bridge/vault/CANONICAL.md``)
       approver_id:           opaque approver identity (for audit)
-      signature:             HMAC-SHA256 over the canonical JSON of {command,
-                             args, rar_type, exp, approver_id}
+      binding_message:       human-readable summary the user actually read
+                             at the consent surface (e.g., "Delete the task
+                             titled 'Q2 launch checklist'?"). Included in
+                             the canonical bytes so that what the user
+                             *saw* is cryptographically bound to what they
+                             *signed*. A compromised bridge that renders
+                             one message and signs different bytes will
+                             fail Vault verification; see ``SECURITY.md``.
+      signature:             HMAC-SHA256 over the canonical JSON of
+                             {command, args, rar_type, exp, approver_id,
+                             binding_message}
     """
     command: str
     args: dict
     rar_type: str
     exp: int
     approver_id: str
+    binding_message: str
     signature: str
 
 

@@ -36,6 +36,18 @@ _EVENT = A2aAuthRequiredEvent(
 )
 
 
+def _valid_eid_for(event: A2aAuthRequiredEvent = _EVENT) -> str:
+    """Mint a tag-verified elicitation_id via the public translator.
+
+    Elicitation IDs include a process-local HMAC tag, so tests that
+    need to assert on the resume side must obtain IDs through the
+    minting path rather than hard-coding strings.
+    """
+    return a2a_auth_required_to_mcp_elicitation(
+        event, bridge_base_url="https://bridge.example",
+    ).elicitation_id
+
+
 # ── Direction 1: A2A → MCP ────────────────────────────────────────────────
 
 
@@ -141,7 +153,7 @@ _SIGNED = {
 
 def test_mcp_to_a2a_accept_translates_to_approved():
     resp = McpElicitationResponse(
-        elicitation_id="el:ctx-abc123:task-001",
+        elicitation_id=_valid_eid_for(),
         action="accept",
         signed_payload=_SIGNED,
     )
@@ -155,7 +167,7 @@ def test_mcp_to_a2a_accept_translates_to_approved():
 
 def test_mcp_to_a2a_decline_translates_to_rejected():
     resp = McpElicitationResponse(
-        elicitation_id="el:ctx-abc123:task-001",
+        elicitation_id=_valid_eid_for(),
         action="decline",
         signed_payload=None,
     )
@@ -167,7 +179,7 @@ def test_mcp_to_a2a_decline_translates_to_rejected():
 
 def test_mcp_to_a2a_cancel_treated_as_decline():
     resp = McpElicitationResponse(
-        elicitation_id="el:ctx-abc123:task-001",
+        elicitation_id=_valid_eid_for(),
         action="cancel",
         signed_payload=None,
     )
@@ -180,7 +192,7 @@ def test_mcp_to_a2a_accept_without_signed_payload_is_error():
     """Accept with no signed_payload is a malformed message — the
     bridge cannot resume an A2A task without proof of consent."""
     resp = McpElicitationResponse(
-        elicitation_id="el:c:t", action="accept", signed_payload=None,
+        elicitation_id=_valid_eid_for(), action="accept", signed_payload=None,
     )
     with pytest.raises(TranslationError, match="signed_payload"):
         mcp_elicitation_response_to_a2a_resume(resp)
@@ -188,7 +200,7 @@ def test_mcp_to_a2a_accept_without_signed_payload_is_error():
 
 def test_mcp_to_a2a_unknown_action_rejected():
     resp = McpElicitationResponse(
-        elicitation_id="el:c:t", action="approve_maybe", signed_payload=None,
+        elicitation_id=_valid_eid_for(), action="approve_maybe", signed_payload=None,
     )
     with pytest.raises(TranslationError, match="unknown.*action"):
         mcp_elicitation_response_to_a2a_resume(resp)
@@ -196,13 +208,41 @@ def test_mcp_to_a2a_unknown_action_rejected():
 
 def test_mcp_to_a2a_malformed_elicitation_id_rejected():
     """Elicitation IDs are minted by us; unexpected shape means tampering
-    or programming error."""
-    for bad_id in ("not-our-format", "el:only_one_part", "el::missing-context"):
+    or programming error. The shape is now ``el:<ctx>:<task>:<tag>`` with
+    an HMAC tag; missing parts, missing fields, or bad tags all reject.
+    """
+    bad_ids = (
+        "not-our-format",
+        "el:only_one_part",
+        "el::missing-context",
+        # Right shape, but no HMAC tag at all.
+        "el:ctx-abc123:task-001",
+        # Right shape and tag positions, but the tag is junk.
+        "el:ctx-abc123:task-001:not-a-valid-tag-AAAAAAAAAAAAAAAAAAAAAAA",
+    )
+    for bad_id in bad_ids:
         resp = McpElicitationResponse(
             elicitation_id=bad_id, action="decline", signed_payload=None,
         )
         with pytest.raises(TranslationError):
             mcp_elicitation_response_to_a2a_resume(resp)
+
+
+def test_mcp_to_a2a_rejects_forged_elicitation_id_with_guessed_ids():
+    """Elicitation-ID forgery resistance: an attacker who guesses or
+    learns (context_id, task_id) but does not hold the bridge's tag
+    secret cannot forge a valid elicitation_id. Crafting
+    ``el:<ctx>:<task>:<arbitrary_tag>`` is rejected at parse time.
+    """
+    import base64
+    # Bogus tag of correct byte length (32 random bytes b64url-encoded).
+    bogus_tag = base64.urlsafe_b64encode(b"\x00" * 32).decode().rstrip("=")
+    forged = f"el:ctx-abc123:task-001:{bogus_tag}"
+    resp = McpElicitationResponse(
+        elicitation_id=forged, action="decline", signed_payload=None,
+    )
+    with pytest.raises(TranslationError, match="tag does not verify"):
+        mcp_elicitation_response_to_a2a_resume(resp)
 
 
 # ── Round-trip: A2A → MCP → MCP-response → A2A-resume ─────────────────────
