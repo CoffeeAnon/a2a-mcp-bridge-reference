@@ -38,7 +38,7 @@ The bridge sits in the data path of every authorization decision but in the trus
 
 ### Single-use, with the carve-out stated
 
-The minted credential is single-use *at consume* (per-jti). It is **not** single-use per signed-payload-at-mint. A captured signed payload can mint multiple JWTs for the *same* `(command, args)` until its TTL expires. The reference enforces "fresh consent per action shape," not "fresh consent per execution." For actions where double-execution matters (financial transfers, idempotent deletes that are not idempotent at the RS, and so on), the resource server must add per-action idempotency, or the Vault must track consumed signed-payload signatures at mint time. See `architecture.md` §"Token re-use across context" for the operational discussion.
+The minted credential is single-use *at consume* (per-jti). It is **not** single-use per signed-payload-at-mint. A captured signed payload can mint multiple JWTs for the *same* `(command, args)` until its TTL expires. The reference enforces "fresh consent per action shape," not "fresh consent per execution." For actions where double-execution matters (financial transfers, idempotent deletes that are not idempotent at the RS, and so on), the resource server must add per-action idempotency, or the Vault must track consumed signed-payload signatures at mint time. See `architecture.md` "Token re-use across context" for the operational discussion.
 
 ## Three deployment tiers, graduated by threat surface
 

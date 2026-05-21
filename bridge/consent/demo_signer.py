@@ -14,7 +14,7 @@ a *fake signer* that runs server-side and signs on the user's behalf.
 production must additionally add consent-page user authentication,
 CSRF protection, a durable session store, and (with client-side
 signing in place) a payload-vs-stored-``ProposedAction`` check before
-calling ``Vault.mint``. See README §"Known production gaps" and
+calling ``Vault.mint``. See README "Known production gaps" and
 ``SECURITY.md`` for the full list.
 
 The fake signer delegates to ``bridge.vault.sign_authorization_details``

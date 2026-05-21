@@ -64,7 +64,7 @@ Fixture `test_fixture_6_nonascii_approver_id` in `tests/unit/test_canonical_fixt
 - Keys: strings only. No numeric keys, no booleans-as-keys. Sorted lexicographically by Unicode code point at every nesting level.
 - Values: any JSON value (string, number, boolean, null, object, array).
 - **Lists are order-sensitive.** A human signing `{"tags":["a","b"]}` does NOT approve `{"tags":["b","a"]}`. Signers MUST NOT reorder list elements between display-to-human and signing.
-- **Numbers**: integers only. Floats are **rejected at canonicalisation** in this reference (see §Floats below).
+- **Numbers**: integers only. Floats are **rejected at canonicalisation** in this reference (see "Floats" below).
 - **Booleans / null**: encoded as `true` / `false` / `null` (no quotes).
 
 ### Floats

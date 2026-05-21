@@ -9,7 +9,7 @@ the minted credential.
 
 This is what the substrate ships. It carries the parameter-binding
 property end-to-end through one process, with one shared secret. The
-trade-off is documented in the rationale page §"Three deployment tiers":
+trade-off is documented in the rationale page "Three deployment tiers":
 Tier 1 closes LLM-side threats (prompt injection, parameter drift,
 hallucinated arguments) but does NOT defend against agent-process
 compromise.
@@ -78,7 +78,7 @@ def _reject_floats(value, path: str = "args") -> None:
         raise TypeError(
             f"canonical_authorization_bytes: float values are not permitted "
             f"in args (at {path}); use integer minor units or strings. "
-            f"See bridge/vault/CANONICAL.md §Floats."
+            f"See the Floats section of bridge/vault/CANONICAL.md."
         )
     if isinstance(value, dict) or isinstance(value, types.MappingProxyType):
         for k, v in value.items():
@@ -108,8 +108,8 @@ def canonical_authorization_bytes(
       - ``binding_message`` is included so the human-readable summary the
         user actually read is cryptographically bound to the signature.
         Without it a compromised bridge could render "Delete tmp file"
-        while signing bytes for "Delete production DB". See
-        ``CANONICAL.md`` §"binding_message" and ``SECURITY.md``.
+        while signing bytes for "Delete production DB". See the
+        "binding_message" section of ``CANONICAL.md`` and ``SECURITY.md``.
 
     This is the load-bearing function: if signer and verifier disagree
     about the canonical form, the signature mismatches. Public so Tier 1
@@ -125,7 +125,7 @@ def canonical_authorization_bytes(
         },
         sort_keys=True,                  # recursive key sort at every nesting level
         separators=(",", ":"),           # no whitespace anywhere
-        ensure_ascii=True,               # explicit: see bridge/vault/CANONICAL.md §"Non-ASCII strings"
+        ensure_ascii=True,               # explicit: see bridge/vault/CANONICAL.md "Non-ASCII strings"
         default=_canonical_default,      # serialise MappingProxyType (immutable args) as plain dict
     ).encode()
 
