@@ -50,6 +50,7 @@ from bridge.vault.interface import (
     MintedCredential,
     PayloadDriftAtMint,
     SignatureMismatch,
+    SignatureReplay,
     SignedAuthorizationDetails,
     UnknownIssuer,
     Vault,
@@ -213,16 +214,26 @@ class OAuthVault(Vault):
     does not let an attacker mint tokens directly: they can still
     forge user signatures, but only the Vault can produce a valid JWT.
 
-    **Restart-replay limitation.** The ``_consumed`` set is in-process
-    memory. A bridge restart inside the 5-minute JWT TTL discards the
-    consumed-jti record, so a captured-but-not-replayed JWT becomes
-    replayable until its ``exp`` passes. Production deployments must
-    swap the ``_consumed`` set for a durable store (sqlite, Redis,
+    **Restart-replay limitation.** The ``_consumed`` and
+    ``_consumed_signatures`` sets are in-process memory. A bridge restart
+    inside the 5-minute JWT TTL discards both records, so a
+    captured-but-not-replayed JWT becomes replayable until its ``exp``
+    passes, and a captured signed payload becomes re-mintable. Production
+    deployments must swap both sets for a durable store (sqlite, Redis,
     Postgres) with TTL-aware eviction. The reference does not do this
-    because (a) stdlib-only is a stated goal, and (b) the failure mode
-    is bounded by the 5-minute TTL. A `JwtResourceServer` deployed
+    because (a) stdlib-only is a stated goal, and (b) the failure mode is
+    bounded by the 5-minute TTL. A ``JwtResourceServer`` deployed
     separately has the same limitation in its own ``_consumed`` set -
-    both layers need durable jti tracking in production.
+    durable jti tracking is a production substrate concern.
+
+    **Mint-replay closure.** ``_consumed_signatures`` tracks
+    canonical-bytes hashes of signed payloads accepted at ``mint``. A
+    second presentation of the same signed payload raises
+    ``SignatureReplay`` rather than producing a fresh credential. One
+    human signature exchanges for one credential, and a captured signed
+    payload cannot be replayed by an attacker holding the bytes. The
+    contract is "fresh consent per execution," not just "fresh consent
+    per action shape."
     """
 
     def __init__(
@@ -252,20 +263,30 @@ class OAuthVault(Vault):
         self._expected_rar_type = expected_rar_type
         self._max_ttl = max_signed_payload_ttl_seconds
         self._consumed: set[str] = set()
+        self._consumed_signatures: set[str] = set()
         self._lock = threading.Lock()
 
     def mint(self, signed: SignedAuthorizationDetails) -> MintedCredential:
         # 1. Verify the human's HMAC over the signed authorization-details.
+        canonical = canonical_authorization_bytes(
+            signed.command, signed.args, signed.rar_type,
+            signed.exp, signed.approver_id, signed.binding_message,
+        )
         expected = hmac.new(
             self._user_signing_secret.encode(),
-            canonical_authorization_bytes(
-                signed.command, signed.args, signed.rar_type,
-                signed.exp, signed.approver_id, signed.binding_message,
-            ),
+            canonical,
             hashlib.sha256,
         ).hexdigest()
         if not hmac.compare_digest(expected, signed.signature):
             raise SignatureMismatch("human signature verification failed")
+
+        # 1b. Mint-replay check: refuse to mint twice from the same signed
+        #     payload. Closes the surface where one human signature could
+        #     otherwise be exchanged for N distinct, valid credentials
+        #     within the signed-payload TTL. The hash is over the canonical
+        #     bytes (not the signature alone) so an attacker cannot collide
+        #     by mutating exp etc. - any difference flips the hash.
+        signature_hash = hashlib.sha256(canonical).hexdigest()
 
         # 2. Validate the rar_type if configured.
         if self._expected_rar_type is not None and signed.rar_type != self._expected_rar_type:
@@ -289,7 +310,20 @@ class OAuthVault(Vault):
                 f"{self._max_ttl}s (would be {signed.exp - now:.0f}s out)"
             )
 
-        # 4. Construct the access-token claims. The shape mirrors how a
+        # 4. Signature-replay check + record, then mint. The check and the
+        #    add happen under the same lock so two concurrent presentations
+        #    of the same signed payload cannot both succeed. Runs after
+        #    structural validation (signature, rar_type, exp) so an invalid
+        #    payload cannot poison the set.
+        with self._lock:
+            if signature_hash in self._consumed_signatures:
+                raise SignatureReplay(
+                    "signed payload already exchanged for a credential; "
+                    "one signature = one credential = one execution"
+                )
+            self._consumed_signatures.add(signature_hash)
+
+        # 5. Construct the access-token claims. The shape mirrors how a
         #    real OAuth+RAR access token would look - a resource server
         #    that knows the RAR `type` can consume this directly.
         jti = secrets.token_hex(8)

@@ -40,7 +40,10 @@ class VaultError(Exception):
       - ``PayloadDriftAtMint``       → client signed something other than proposed
       - ``CredentialDrift``          → live request doesn't match what was approved
       - ``CredentialExpired``        → time bound exceeded
-      - ``CredentialReplay``         → single-use violation
+      - ``CredentialReplay``         → single-use violation (at consume)
+      - ``SignatureReplay``          → multi-mint violation (at mint): same
+                                       signed payload presented to the Vault
+                                       more than once
       - ``PolicyDenied``             → identity lacks the requested permission
                                        (reserved for production AS-side policy;
                                        not raised by the in-process or HS256 demos —
@@ -102,6 +105,23 @@ class PolicyDenied(VaultError):
 
 class CredentialReplay(VaultError):
     """Credential has already been consumed."""
+
+
+class SignatureReplay(VaultError):
+    """The same signed RAR payload was presented to the Vault more than once.
+
+    Distinct from ``CredentialReplay``, which fires at *consume* when a minted
+    credential is presented twice. ``SignatureReplay`` fires at *mint*: it
+    closes the multi-mint surface where one human signature could otherwise
+    be exchanged for N distinct, valid credentials within the signed-payload
+    TTL. The Vault tracks consumed signed-payload signatures and refuses to
+    mint twice from the same one. One signature = one credential = one
+    execution.
+
+    The property this protects is "fresh consent per execution," not just
+    "fresh consent per action shape." Captured signed payloads cannot be
+    replayed by an attacker holding the bytes (e.g., a leaked WebSocket
+    frame, a misbehaving relay, a compromised bridge process)."""
 
 
 class CredentialExpired(VaultError):

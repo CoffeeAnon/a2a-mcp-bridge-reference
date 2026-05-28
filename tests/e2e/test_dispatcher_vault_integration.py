@@ -198,24 +198,25 @@ def test_tier2_attacker_without_user_secret_cannot_forge_a_new_signature(seeded_
     assert drift_id in {t["task_id"] for t in client.list()}
 
 
-def test_tier2_compromised_agent_can_remint_same_action_within_ttl(seeded_client):
-    """Honest limitation of the reference: an attacker who has captured
-    the human's signed payload can re-mint credentials for *the same
-    action* until the signed payload's TTL expires.
+def test_tier2_captured_signed_payload_cannot_be_reminted(seeded_client):
+    """Consent Atomicity: one human signature exchanges for at most one
+    credential. An attacker who captures the human's signed payload
+    (leaked WebSocket frame, compromised relay, compromised bridge
+    process) cannot replay it to mint a second credential, even within
+    the signed-payload TTL.
 
-    The Vault does not track "this signed payload has already been used
-    to mint a credential"; it tracks "this minted credential's jti has
-    been consumed." So within the 5-minute signed-payload TTL, a
-    captured payload can produce multiple distinct credentials (each
-    single-use at consume).
+    Closes the multi-mint surface that earlier revisions of this
+    reference left open as a documented carve-out. The Vault now tracks
+    canonical-bytes hashes of signed payloads accepted at mint and
+    raises ``SignatureReplay`` on the second presentation. The contract
+    is "fresh consent per execution", not just "fresh consent per
+    action shape."
 
-    This is a documented narrowing of the Zero-Trust property: the
-    reference enforces "fresh consent per *action shape*", not "fresh
-    consent per *execution*". A production deployment that needs the
-    stronger property must track consumed signed-payload signatures at
-    mint time (a small additional set on the Vault). See the Vault
-    docstring and the rationale page "Failure modes worth designing for."
+    See ``bridge/vault/oauth.py``'s ``_consumed_signatures`` and the
+    ``SignatureReplay`` docstring in ``bridge/vault/interface.py``.
     """
+    from bridge.vault.interface import SignatureReplay
+
     client, promised_id, _ = seeded_client
     vault = OAuthVault(
         user_signing_secret=USER_SECRET,
@@ -225,12 +226,12 @@ def test_tier2_compromised_agent_can_remint_same_action_within_ttl(seeded_client
 
     signed = _signed("delete-task", {"task_id": promised_id})
     first_credential = vault.mint(signed)
-    second_credential = vault.mint(signed)
 
-    # Two distinct credentials, both valid until consumed.
-    assert first_credential.jti != second_credential.jti
-    assert first_credential.credential != second_credential.credential
+    # Second presentation of the same signed payload is refused. The
+    # human signed once; only one credential exists.
+    with pytest.raises(SignatureReplay):
+        vault.mint(signed)
 
-    # Each can be consumed independently, though only one execution
-    # actually makes sense for a delete (the second would 404 at the RS).
-    # The point is: the Vault did not refuse the second mint.
+    # The first credential still works (the closure is at mint, not at
+    # consume - a legitimately minted credential is unaffected).
+    assert first_credential.jti
