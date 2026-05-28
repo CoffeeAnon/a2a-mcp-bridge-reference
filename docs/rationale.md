@@ -1,16 +1,26 @@
 # Design Rationale
 
-This document captures the *why* behind the two patterns this reference demonstrates. The companion `architecture.md` covers the *how*.
+This document captures the *why* behind the design. The companion `architecture.md` covers the *how*.
+
+## Four necessary and sufficient constraints
+
+A bridge that lets an LLM call destructive tools through a human-in-the-loop check has to hold four properties at once. Each is independent of the others and each fails in a specific way if missing. Together they are sufficient for the design's goal: *every change to data is approved by a named human, and the approval is verifiable from an audit log alone.*
+
+1. **Parameter-Bound Intent.** The human's signature is computed over the canonical bytes of the exact command and arguments that will run. Without this, the LLM can swap arguments after approval (the "drift attack") and the system has no way to notice.
+2. **Consent Atomicity.** One signed payload mints at most one credential. Without this, a captured signed payload (leaked WebSocket frame, compromised relay, hostile bridge holding the bytes) can be replayed to mint N credentials for the same action within the signed-payload TTL - one approval, N executions.
+3. **Independent Consent Surface.** The entity that displays the proposed action to the human is in a different trust domain from the entity orchestrating the LLM. Without this, a hostile bridge can render one action on screen while passing canonical bytes for a different action to the user's signer, and the binding-message defence only catches the deception forensically after the fact.
+4. **Destination Gating.** The resource server refuses any request lacking a valid Vault-minted, parameter-bound credential. Without this, an agent that finds the RS's direct API can bypass the entire architecture by calling it without a credential at all.
+
+The reference closes constraints 1, 2, and 4 in code. Constraint 3 is a deployment-shape requirement (the demo's consent server runs on the bridge for self-containedness; see "Production deployment shape" below).
 
 ## What the bridge has to be
 
-A useful A2A↔MCP bridge has to hold three properties at once:
+A useful A2A↔MCP bridge holds the four constraints above plus two protocol-level properties:
 
 1. **Stateful.** `context_id` continuity across calls.
 2. **HITL-aware.** A2A's `auth_required` SSE state translated to an MCP elicitation, with the resume routing back to the paused task.
-3. **Parameter-bound.** The human approves the specific action with the specific arguments, and only that action with those arguments runs.
 
-Each property is independent. A bridge missing any one of them fails in a specific way: a stateless bridge fragments conversations, a HITL-unaware bridge cannot route destructive proposals to a human at all, and a bridge without parameter binding leaves the LLM free to mutate its own arguments between approval and execution. The design below holds all three.
+A stateless bridge fragments conversations; a HITL-unaware bridge cannot route destructive proposals to a human at all. The two patterns below realise the four constraints inside that protocol shape.
 
 ## The two patterns
 
@@ -26,19 +36,27 @@ The reference demonstrates two distinct contributions.
 
 ### Pattern 2: Cryptographic delegation
 
-`bridge.vault` and `bridge.rs` enforce parameter-bound authorization via three layers:
+`bridge.vault` and `bridge.rs` realise constraints 1, 2, and 4 across three independent enforcement layers:
 
-1. **Vault verifies the human signature** before minting any credential. (Trust-root layer - see asymmetry note below.)
+1. **Vault verifies the human signature and tracks signed-payload single-use.** Constraint 1 (parameter binding) and constraint 2 (consent atomicity) both close here. The Vault verifies the HMAC over canonical authorization-details bytes and refuses to mint twice from the same signed payload (`_consumed_signatures`). One signature exchanges for one credential.
 2. **Bridge cannot alter** what the Vault minted: a JWT pinned to the approved parameters. (Structural property of the dispatcher's pass-through, asserted by code inspection.)
-3. **Resource server validates** the credential's `authorization_details` claim against the live request, with its own consumed-jti state. (Independent verification.)
+3. **Resource server validates** the credential's `authorization_details` claim against the live request, with its own consumed-jti state. Constraint 4 (destination gating).
 
 The bridge sits in the data path of every authorization decision but in the trust path of none of them. This is the RAR-shaped pattern (RFC 9396 per-action `authorization_details` + per-action mint + RS enforcement) adapted from open-banking FAPI 2.0 deployments to agent authorization. FAPI 2.0 layers further mechanisms on top (mTLS, DPoP, PAR) that this reference does not implement - the *core* RAR-binding pattern is what it draws on.
 
 **Layer asymmetry.** Layers 2 and 3 are mutually independent: a bug in either does not compromise the other. Layer 1 is the trust root for the human-signature property. The RS has no path to re-verify the human's HMAC (it is not in the JWT claims), so an `OAuthVault` bug that mints without verifying the human signature would not be caught downstream. Read carefully: Layers 2 and 3 protect what happens *after* mint; Layer 1 protects whether mint should have happened at all.
 
-### Single-use, with the carve-out stated
+### Constraint 3: Independent consent surface in production
 
-The minted credential is single-use *at consume* (per-jti). It is **not** single-use per signed-payload-at-mint. A captured signed payload can mint multiple JWTs for the *same* `(command, args)` until its TTL expires. The reference enforces "fresh consent per action shape," not "fresh consent per execution." For actions where double-execution matters (financial transfers, idempotent deletes that are not idempotent at the RS, and so on), the resource server must add per-action idempotency, or the Vault must track consumed signed-payload signatures at mint time. See `architecture.md` "Token re-use across context" for the operational discussion.
+Constraints 1, 2, and 4 are properties of code. Constraint 3 is a property of *deployment shape* and cannot be enforced by the bridge alone: the bridge is the entity the constraint is constraining.
+
+The demo's URL-mode consent server (`bridge/consent/url_mode.py`) runs on the bridge process so the reference is self-contained. In that configuration, the `ProposedAction` is `frozen=True` + `MappingProxyType`, so the display and the signed bytes come from the same immutable record - the demo cannot drift the display by construction. The `binding_message` is also part of the canonical bytes, so even in a richer in-process configuration, a render-vs-sign drift produces a signature the Vault rejects (`tests/e2e/test_three_layer_enforcement.py::test_vault_rejects_binding_message_swap`).
+
+What none of those defences cover: a production deployment with WebAuthn / Passkey at the user, where the bridge ships JavaScript to the user's browser. The JS computes canonical bytes for the action and calls `navigator.credentials.get(...)` with that as the challenge. A hostile bridge can render "Read email" HTML while composing canonical bytes for "Delete database" and generating a matching `binding_message`. The user's signer signs honestly; the user was deceived. The signature verifies. The credential mints.
+
+The architectural fix is to put the consent surface in a different trust domain from the bridge - a separate authorization-server-hosted consent page that parses and renders the raw `(command, args)` itself, independent of any HTML the bridge supplies. The user's signer is then signing what the AS displays, not what the bridge displays. This is the standard FAPI 2.0 deployment shape and is the production form constraint 3 requires.
+
+The reference does not bundle a separate AS process because the architectural mechanics it teaches do not depend on the separation - the demo's frozen `ProposedAction` is the same property a separate AS would enforce, just inside one process. The production swap is a deployment-topology change, not a code change to the Vault contract.
 
 ## Three deployment tiers, graduated by threat surface
 
@@ -81,12 +99,10 @@ The two efforts are complementary. A complete enterprise deployment plausibly wa
 
 ## What this rationale commits the design to
 
-This page commits the bridge design to four universal properties and one Tier-2-only property:
+This page commits the bridge design to the four constraints at the top of this document - parameter-bound intent, consent atomicity, independent consent surface (production deployment), destination gating - plus three protocol-level properties:
 
-1. **Stateful.** `context_id` continuity across MCP tool calls. *All tiers.*
-2. **HITL-aware.** `auth_required` SSE event translated to MCP elicitation, with resume-via-`message:send`. *All tiers above Tier 0.*
-3. **Parameter-bound.** Every approved action is bound to the exact arguments the human approved, via HMAC at Tier 1 and RAR `authorization_details` at Tier 2.
-4. **Translation-only, not policy-bearing.** The bridge translates between protocol envelopes but does not make authorization decisions.
-5. **Delegation-engine, not pass-through** *(Tier 2 only)*. The bridge presents the human's signed approval to a Vault and receives a freshly-minted, single-use, action-scoped token. The agent never holds persistent destructive credentials.
+- **Stateful.** `context_id` continuity across MCP tool calls. *All tiers.*
+- **HITL-aware.** `auth_required` SSE event translated to MCP elicitation, with resume-via-`message:send`. *All tiers above Tier 0.*
+- **Translation-only, not policy-bearing.** The bridge translates between protocol envelopes but does not make authorization decisions. At Tier 2 this strengthens to *delegation-engine*: the bridge presents the human's signed approval to a Vault and receives a freshly-minted, single-use, action-scoped token. The agent holds no persistent destructive credentials between transactions.
 
 See `architecture.md` for the components, flows, and threat model that hold these properties.
