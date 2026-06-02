@@ -13,28 +13,24 @@ A bridge that lets an LLM call destructive tools through a human-in-the-loop che
 
 The reference closes constraints 1, 2, and 4 in code. Constraint 3 is a deployment-shape requirement (the demo's consent server runs on the bridge for self-containedness; see "Production deployment shape" below).
 
-## What the bridge has to be
+## The security core and the two paths
 
-A useful A2A↔MCP bridge holds the four constraints above plus two protocol-level properties:
+The four constraints come from one core: a human signs the exact `(command, args)`, an authorization server (Vault) mints a single-use credential bound to those bytes, and the resource server refuses anything else. That core is where the security comes from. A2A is not part of it. A2A is one way to carry a signed approval between processes, and the guarantee that the approval means what it says comes from the Vault binding, not from the transport.
+
+What varies between deployments is not how many agents are involved, but whether the signed approval stays inside one agent's own domain or has to cross into another's. The reference answers two questions on that axis.
+
+**Single-domain.** A user approves an action in a zero-trust way, through an interface the agent can watch but not subvert. One agent exposing MCP tools answers this, with no A2A: the server emits a URL-mode elicitation on a HITL-gated `tools/call` and resumes on retry once the human has approved (`bridge/mcp/hitl.py`). The signed approval is produced and consumed inside that one agent's transaction. It still spans several trust surfaces (the human's MCP host, the agent, and the consent server in a separate trust domain), which is what "watch but not subvert" requires: constraint 3 plus a faithful host, since the agent picks the URL and relays the response.
+
+**Multi-domain.** A sub-agent developer needs to trust that the human really authorized this specific change. The signed approval has to cross into a separate agent's domain, with the leaf action bound by the Vault. It needs a carrier that pauses a deep action and bubbles its `authorization_details` back to the human's signer with no bearer-passing. A2A's task lifecycle is built for exactly that cross-agent pause and resume, which is why the reference uses it. The security still does not come from A2A: the Vault binds the human's signature to the action, so the property would hold over any carrier of A2A's shape. The substitution is a different cross-agent transport, not a different security model, and not MCP, which is host-to-tool rather than agent-to-agent. (OAuth token exchange, RFC 8693, is complementary: it propagates delegated authority across principals but does not itself carry the interactive approval pause. See "Out of scope for v1".)
+
+Two protocol-level properties hold across both paths:
 
 1. **Stateful.** `context_id` continuity across calls.
-2. **HITL-aware.** A2A's `auth_required` SSE state translated to an MCP elicitation, with the resume routing back to the paused task.
+2. **HITL-aware.** A pause translated to an MCP elicitation (and, on the multi-domain path, an A2A `auth_required` SSE event translated likewise), with the resume routing back to the paused action.
 
-A stateless bridge fragments conversations; a HITL-unaware bridge cannot route destructive proposals to a human at all. The two patterns below realise the four constraints inside that protocol shape.
+The rest of this section covers the core that both paths share, then the carrier the reference ships for the multi-domain path.
 
-## The two patterns
-
-The reference demonstrates two distinct contributions.
-
-### Pattern 1: Protocol orchestration
-
-`bridge.translation` translates between A2A's task-lifecycle SSE shape and MCP's elicitation shape. The translation preserves three properties:
-
-- **`context_id` continuity.** The MCP elicitation carries an `elicitation_id` derived from the A2A context, so the resume message routes back to the paused task.
-- **`authorization_details` byte-identity.** The bridge does NOT re-canonicalise. What the agent proposed is exactly what the human signs.
-- **URL-mode elicitation.** Required by MCP 2025-11-25 for sensitive consent.
-
-### Pattern 2: Cryptographic delegation
+### The core: cryptographic delegation
 
 `bridge.vault` and `bridge.rs` realise constraints 1, 2, and 4 across three independent enforcement layers:
 
@@ -57,6 +53,16 @@ What none of those defences cover: a production deployment with WebAuthn / Passk
 The architectural fix is to put the consent surface in a different trust domain from the bridge - a separate authorization-server-hosted consent page that parses and renders the raw `(command, args)` itself, independent of any HTML the bridge supplies. The user's signer is then signing what the AS displays, not what the bridge displays. This is the standard FAPI 2.0 deployment shape and is the production form constraint 3 requires.
 
 The reference does not bundle a separate AS process because the architectural mechanics it teaches do not depend on the separation - the demo's frozen `ProposedAction` is the same property a separate AS would enforce, just inside one process. The production swap is a deployment-topology change, not a code change to the Vault contract.
+
+### The carrier for the multi-domain path
+
+`bridge.translation` is the carrier the reference ships for the multi-domain path: it translates between A2A's task-lifecycle SSE shape and MCP's elicitation shape so a sub-agent's pause can bubble up to the human's MCP host. It carries the signed approval without touching its meaning, which the three properties below guarantee:
+
+- **`context_id` continuity.** The MCP elicitation carries an `elicitation_id` derived from the A2A context, so the resume routes back to the paused action.
+- **`authorization_details` byte-identity.** The bridge does NOT re-canonicalise. What the agent proposed is exactly what the human signs.
+- **URL-mode elicitation.** Required by MCP 2025-11-25 for sensitive consent.
+
+The single-domain path needs none of this translation: a single MCP agent emits its own URL-mode elicitation and resumes on retry (`bridge/mcp/hitl.py`), with the consent hop going to a separate trust domain rather than to another agent. The translation layer earns its place only once a second agent's domain is in the chain.
 
 ## Three deployment tiers, graduated by threat surface
 

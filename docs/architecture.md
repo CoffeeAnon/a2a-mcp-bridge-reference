@@ -1,6 +1,6 @@
 # Architecture
 
-Companion to `rationale.md`. The rationale answers *why*; this document answers *how*: components, flows, and the threat model.
+Companion to `rationale.md`. The rationale answers *why*; this document answers *how*: components, flows, and the threat model. The security core is the Vault delegation pattern (sign exact `(command, args)` → mint single-use credential → resource server enforces); the two HITL walkthroughs below show it carried over the single-domain path (a single MCP agent, implemented in code) and the multi-domain path (A2A between agents, target architecture). A2A carries the signed approval; it is not where the security comes from.
 
 ## Components
 
@@ -123,7 +123,9 @@ Client                       Agent service                 Vault                
   │◀── SSE: completed                │                       │                    │
 ```
 
-### `delete_task` invoked through the MCP surface
+### `delete_task` invoked through the MCP surface (single-domain, implemented)
+
+This is the single-domain path, and it is the one the reference implements in code: a single MCP agent emits the URL-mode elicitation and resumes on retry, with no A2A. The flow is driven end to end through the actual server in `tests/e2e/test_mcp_elicitation_emission.py`. The A2A walkthrough above is the multi-domain carrier, and is target architecture (simulated by `bridge.walkthrough`).
 
 ```
 MCP host (LLM)              Agent service                    Vault                RS

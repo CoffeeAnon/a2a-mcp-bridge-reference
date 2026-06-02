@@ -7,7 +7,7 @@ A reference implementation of a **stateful, HITL-aware, parameter-bound** bridge
 
 ## The four necessary and sufficient constraints
 
-A bridge that lets an LLM call destructive tools through a human-in-the-loop check has to hold four properties. Each fails in a specific way if missing; together they are sufficient for the design's goal — *every change to data is approved by a named human, and the approval is verifiable from an audit log alone.*
+A bridge that lets an LLM call destructive tools through a human-in-the-loop check has to hold four properties. Each fails in a specific way if missing; together they are sufficient for the design's goal: *every change to data is approved by a named human, and the approval is verifiable from an audit log alone.*
 
 1. **Parameter-Bound Intent.** The human's signature is computed over the canonical bytes of the exact command and arguments that will run. Without this, the LLM can swap arguments after approval and the system has no way to notice.
 2. **Consent Atomicity.** One signed payload mints at most one credential. Without this, a captured signed payload can be replayed to turn one approval into N executions within the signed-payload TTL.
@@ -16,10 +16,18 @@ A bridge that lets an LLM call destructive tools through a human-in-the-loop che
 
 The reference closes constraints 1, 2, and 4 in code. Constraint 3 is a deployment-shape requirement (see "Production deployment shape" below): the demo's consent server runs on the bridge for self-containedness; a production deployment must put it in a separate trust domain.
 
-The design realises the four constraints across two patterns:
+### The security core and the two paths
 
-1. **Protocol orchestration (Pattern 1).** Translation between A2A's task-lifecycle SSE shape and MCP's elicitation shape, so a human in an MCP host (Claude Desktop, IDE, custom orchestrator) can be the human-in-the-loop for an action proposed by a remote A2A agent. Stateful `context_id` continuity across the round-trip.
-2. **Cryptographic delegation (Pattern 2).** Every destructive action is approved by a human signing the *specific* `authorization_details` payload (RFC 9396 RAR shape). The signature drives an authorization server (Vault) to mint a single-use, action-scoped credential; the Vault refuses to mint twice from the same signed payload; an independent resource server validates the credential against the live request. The agent process holds no persistent destructive credentials.
+Those four constraints come from one core: a human signs the exact `(command, args)`, an authorization server (Vault) mints a single-use credential bound to those bytes, and the resource server refuses anything else. That core is where the security comes from. A2A is not part of it. A2A is one way to carry a signed approval between processes, and the guarantee that the approval means what it says comes from the Vault binding, not from the transport.
+
+What varies between deployments is not how many *agents* are involved, but whether the signed approval stays inside one agent's own domain or has to cross into another's. The reference answers two questions on that axis:
+
+1. **Single-domain: a user approving an action in a zero-trust way, through an interface the agent can watch but not subvert.** One agent exposing MCP tools answers this, with no A2A: the server emits a URL-mode elicitation on a HITL-gated `tools/call` and resumes on retry once the human has approved (`bridge/mcp/server.py`, `bridge/mcp/hitl.py`). The signed approval is produced and consumed inside that one agent's transaction. It still spans several trust surfaces (the human's MCP host, the agent, and the consent server in a separate trust domain), which is what "watch but not subvert" requires: constraint 3 plus a faithful host, since the agent picks the URL and relays the response, so a bridge-hosted consent page or a hostile host collapses it.
+2. **Multi-domain: a sub-agent developer trusting the human really authorized this specific change.** Here the signed approval has to cross into a separate agent's domain, with the leaf action bound by the Vault. It needs a carrier that pauses a deep action and bubbles its `authorization_details` back to the human's signer with no bearer-passing. A2A's task lifecycle is built for exactly that cross-agent pause and resume, which is why the reference uses it. The security still does not come from A2A: the Vault binds the human's signature to the action, so the property would hold over any carrier of A2A's shape. The substitution is a different cross-agent transport, not a different security model, and not MCP, which is host-to-tool rather than agent-to-agent.
+
+So the A2A↔MCP translation this reference ships is the carrier for the multi-domain case. It is not the source of the security property, and it is not needed for the single-domain case at all.
+
+Underneath both questions is one delegation pattern: every destructive action is approved by a human signing the *specific* `authorization_details` payload (RFC 9396 RAR shape); the signature drives the Vault to mint a single-use, action-scoped credential; the Vault refuses to mint twice from the same signed payload; and an independent resource server validates the credential against the live request. The agent process holds no persistent destructive credentials.
 
 The reference ships two tiers behind a single `Vault` Protocol:
 
@@ -67,7 +75,7 @@ Three tests carry most of the design's weight and are short enough to read direc
 
 - `tests/e2e/test_three_layer_enforcement.py` exercises Layer 1 (Vault verify-before-mint) and Layer 3 (RS independent verify) through code. Layer 2, the dispatcher's structural pass-through, is asserted by code inspection - what this file tests is Layer 3 catching mutation if it occurred, the defence-in-depth fallback.
 - `tests/e2e/test_dispatcher_vault_integration.py::test_tier2_attacker_without_user_secret_cannot_forge_a_new_signature` exercises the production-shape Zero-Trust property: an attacker without the user signing key cannot forge a signature for a new action. The HS256 demo configuration is materially weaker than the WebAuthn-bound production shape, and the docs say so where it matters.
-- `tests/e2e/test_mcp_elicitation_emission.py` drives the real MCP server over the SDK's in-memory client/server harness: a HITL-gated `tools/call` emits a URL-mode elicitation (`URL_ELICITATION_REQUIRED`) at the consent surface, and a retried call resumes after approval to mint + execute (target deleted, bystander untouched). `tests/unit/test_mcp_hitl_gate.py` covers the `McpHitlGate` emit/resume primitive directly. `tests/e2e/test_mcp_hitl_building_blocks.py` remains as the by-hand composition of the same building blocks.
+- `tests/e2e/test_mcp_elicitation_emission.py` drives the actual MCP server over the SDK's in-memory client/server harness: a HITL-gated `tools/call` emits a URL-mode elicitation (`URL_ELICITATION_REQUIRED`) at the consent surface, and a retried call resumes after approval to mint + execute (target deleted, bystander untouched). `tests/unit/test_mcp_hitl_gate.py` covers the `McpHitlGate` emit/resume primitive directly. `tests/e2e/test_mcp_hitl_building_blocks.py` remains as the by-hand composition of the same building blocks.
 
 ---
 
