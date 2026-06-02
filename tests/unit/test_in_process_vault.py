@@ -16,6 +16,7 @@ from bridge.vault import (
     MalformedCredential,
     PayloadDriftAtMint,
     SignatureMismatch,
+    SignatureReplay,
     sign_authorization_details,
 )
 
@@ -62,6 +63,17 @@ def test_mint_rejects_unexpected_rar_type():
     vault = InProcessVault(secret=SECRET, expected_rar_type="some_other_type")
     signed = _signed()
     with pytest.raises(PayloadDriftAtMint):
+        vault.mint(signed)
+
+
+def test_mint_rejects_signature_replay(vault):
+    """Consent Atomicity at Tier 1: one signed payload mints at most one
+    credential. A second presentation of the same signed payload raises
+    SignatureReplay rather than producing a fresh credential with a new
+    jti."""
+    signed = _signed()
+    vault.mint(signed)
+    with pytest.raises(SignatureReplay):
         vault.mint(signed)
 
 

@@ -36,6 +36,7 @@ from bridge.vault.interface import (
     MintedCredential,
     PayloadDriftAtMint,
     SignatureMismatch,
+    SignatureReplay,
     SignedAuthorizationDetails,
     Vault,
 )
@@ -175,6 +176,15 @@ class InProcessVault(Vault):
     legitimate-but-unused credentials are also unverifiable. For Tier 1
     that is acceptable because the human can re-approve within the
     5-minute TTL.
+
+    **Mint-replay closure.** ``_consumed_signatures`` tracks canonical-bytes
+    hashes of signed payloads accepted at ``mint``. A second presentation
+    of the same signed payload raises ``SignatureReplay`` rather than
+    producing a fresh credential. One human signature exchanges for one
+    credential. The same restart caveat as ``_consumed`` applies: a Tier-1
+    restart loses the set, but it also loses ``_issued``, so a replayed
+    payload post-restart fails at the issuance check rather than the
+    signature-replay check.
     """
 
     def __init__(
@@ -192,17 +202,19 @@ class InProcessVault(Vault):
         self._expected_rar_type = expected_rar_type
         self._max_ttl = max_signed_payload_ttl_seconds
         self._consumed: set[str] = set()
+        self._consumed_signatures: set[str] = set()
         self._issued: dict[str, MintedCredential] = {}
         self._lock = threading.Lock()
 
     def mint(self, signed: SignedAuthorizationDetails) -> MintedCredential:
         # 1. Verify HMAC.
+        canonical = canonical_authorization_bytes(
+            signed.command, signed.args, signed.rar_type,
+            signed.exp, signed.approver_id, signed.binding_message,
+        )
         expected = hmac.new(
             self._secret.encode(),
-            canonical_authorization_bytes(
-                signed.command, signed.args, signed.rar_type,
-                signed.exp, signed.approver_id, signed.binding_message,
-            ),
+            canonical,
             hashlib.sha256,
         ).hexdigest()
         if not hmac.compare_digest(expected, signed.signature):
@@ -229,9 +241,11 @@ class InProcessVault(Vault):
                 f"unexpected rar_type: {signed.rar_type!r} != {self._expected_rar_type!r}"
             )
 
-        # 3. Mint a credential. In Tier 1 the credential IS the signature
-        #    augmented with a per-mint jti so single-use can be enforced
-        #    even when the same payload is signed twice.
+        # 3. Signature-replay check + record, then mint. Same lock as
+        #    ``_issued`` so two concurrent presentations of the same signed
+        #    payload cannot both produce a credential. Runs after structural
+        #    validation so an invalid payload cannot poison the set.
+        signature_hash = hashlib.sha256(canonical).hexdigest()
         jti = secrets.token_hex(8)
         credential = f"{signed.signature}.{jti}"
         minted = MintedCredential(
@@ -242,6 +256,12 @@ class InProcessVault(Vault):
             jti=jti,
         )
         with self._lock:
+            if signature_hash in self._consumed_signatures:
+                raise SignatureReplay(
+                    "signed payload already exchanged for a credential; "
+                    "one signature = one credential = one execution"
+                )
+            self._consumed_signatures.add(signature_hash)
             self._issued[jti] = minted
         return minted
 

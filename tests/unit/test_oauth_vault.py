@@ -18,6 +18,7 @@ from bridge.vault import (
     OAuthVault,
     PayloadDriftAtMint,
     SignatureMismatch,
+    SignatureReplay,
     UnknownIssuer,
     WrongAudience,
     sign_authorization_details,
@@ -92,6 +93,18 @@ def test_mint_rejects_unexpected_rar_type():
     )
     with pytest.raises(PayloadDriftAtMint):
         vault.mint(_signed())
+
+
+def test_mint_rejects_signature_replay(vault):
+    """Consent Atomicity at Tier 2: one signed payload mints at most one
+    credential. The Vault tracks canonical-bytes hashes of signed payloads
+    accepted at mint and refuses to mint twice from the same one."""
+    signed = _signed()
+    first = vault.mint(signed)
+    with pytest.raises(SignatureReplay):
+        vault.mint(signed)
+    # The first credential is unaffected and consumes normally.
+    vault.consume(first.credential, "delete-task", {"task_id": "t-42"})
 
 
 # ── consume: parameter binding through JWT claims ──────────────────────────
