@@ -20,12 +20,14 @@ from collections.abc import AsyncIterator
 from mcp import types as mcp_types
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.shared.exceptions import UrlElicitationRequiredError
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount
 
 from bridge.audit import AuditRow, AuditSink
 from bridge.mcp.invoker import ToolInvoker
+from bridge.mcp.hitl import McpHitlGate
 from bridge.auth.hmac import CallerIdentity, TokenStore
 from bridge.mcp.auth import AuthError, verify_bearer
 from bridge.mcp.tools import mcp_tool_specs
@@ -45,10 +47,19 @@ class _ToolCallError(Exception):
     """
 
 
+def _binding_message(command: str, args: dict) -> str:
+    """Human-readable summary of the proposed action, rendered on the consent
+    page and bound into the signed canonical bytes. Demo-grade: production
+    sources this from a per-tool renderer, not string interpolation."""
+    arg_text = ", ".join(f"{k}={v}" for k, v in sorted(args.items()))
+    return f"Approve action: {command} ({arg_text})" if arg_text else f"Approve action: {command}"
+
+
 @dataclass
 class McpApp:
     """Adapter holding the lowlevel Server + the Starlette mount."""
     starlette: Starlette
+    server: Server
 
     def starlette_app(self) -> Starlette:
         return self.starlette
@@ -63,14 +74,36 @@ def build_mcp_app(
     audit: AuditSink,
     token_store: TokenStore,
     secret: str,
+    consent_store=None,
+    vault=None,
+    rar_type: str = "tasktracker_task_action",
+    bridge_base_url: str = "https://bridge.invalid",
 ) -> McpApp:
     """Construct a Starlette app exposing /mcp with bearer auth.
 
     The session manager is started/stopped via Starlette's lifespan mechanism.
     Wrap TestClient usage in a `with` block to trigger the lifespan:
         with TestClient(app.starlette_app()) as client: ...
+
+    HITL (single-agent path): when ``consent_store`` and ``vault`` are
+    supplied, a HITL-gated ``tools/call`` emits a URL-mode elicitation
+    pointing at the independent consent surface (``bridge.consent.url_mode``)
+    and resumes on retry once the human has approved - no A2A. Omit them and
+    the surface stays read-only (HITL-gated tools are not exposed),
+    preserving the prior behaviour.
     """
     server = Server("task-tracker-mcp", version="0.1.0")
+
+    gate = (
+        McpHitlGate(
+            consent_store=consent_store,
+            bridge_base_url=bridge_base_url,
+            rar_type=rar_type,
+            vault=vault,
+        )
+        if consent_store is not None and vault is not None
+        else None
+    )
 
     @server.list_tools()
     async def _list_tools() -> list[mcp_types.Tool]:
@@ -80,10 +113,10 @@ def build_mcp_app(
                 description=spec.description,
                 inputSchema=spec.parameters,
             )
-            for spec in mcp_tool_specs()
+            for spec in mcp_tool_specs(include_hitl=gate is not None)
         ]
 
-    specs_by_name = {s.name: s for s in mcp_tool_specs()}
+    specs_by_name = {s.name: s for s in mcp_tool_specs(include_hitl=gate is not None)}
 
     @server.call_tool()
     async def _call_tool(name: str, arguments: dict) -> list[mcp_types.TextContent]:
@@ -94,8 +127,28 @@ def build_mcp_app(
         caller = _CURRENT_CALLER.get()
         actor = f"mcp:{caller.display_name}" if caller else "mcp:unknown"
         thread_id = f"mcp:{caller.caller_id}" if caller else "mcp:anon"
+        caller_id = caller.caller_id if caller else "mcp:anon"
 
         result = invoker.invoke(spec, arguments, caller=caller)
+
+        # HITL via URL-mode elicitation (single-agent path). On an
+        # approval-required outcome: if the human has already approved this
+        # exact action at the consent surface, resume by minting the
+        # credential and re-dispatching with it; otherwise emit a URL-mode
+        # elicitation and let the client complete it out-of-band, then retry.
+        if result.approval_required and gate is not None:
+            payload = result.approval_payload or {}
+            cmd, cmd_args = payload.get("command"), payload.get("args", {})
+            token = gate.try_resume(command=cmd, args=cmd_args, caller_id=caller_id)
+            if token is not None:
+                result = invoker.invoke(spec, arguments, approval_token=token, caller=caller)
+            else:
+                binding = _binding_message(cmd, cmd_args)
+                elicit = gate.begin(
+                    command=cmd, args=cmd_args, caller_id=caller_id, binding_message=binding,
+                )
+                raise UrlElicitationRequiredError([elicit], message=binding)
+
         full_content = result.content or ""
         snippet = full_content[:500]
 
@@ -145,4 +198,4 @@ def build_mcp_app(
         routes=[Mount("/mcp", app=_handle_mcp)],
         lifespan=_lifespan,
     )
-    return McpApp(starlette=starlette)
+    return McpApp(starlette=starlette, server=server)

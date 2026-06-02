@@ -37,7 +37,7 @@ What's actually demonstrated in code:
 - The `Vault` Protocol with two interchangeable implementations (Tier 1 in-process, Tier 2 OAuth-shape with separated RS).
 - Signature verification, JWT algorithm pinning, canonical-bytes contract with cross-language fixtures, independent RS validation, parameter-drift rejection at three layers.
 - **Signed-payload single-use at mint**: both Vaults track canonical-bytes hashes of accepted payloads and refuse a second mint from the same signature (`SignatureReplay`). Closes the multi-mint surface that earlier revisions left as a documented carve-out.
-- The A2A↔MCP translation in pure data, the URL-mode consent surface, and the MCP `tools/list` + `tools/call` (read-only) wiring.
+- The A2A↔MCP translation in pure data, the URL-mode consent surface, and the MCP `tools/list` + `tools/call` wiring, including server-side URL-mode elicitation **emission and resume** for HITL-gated tools (the single-agent path, no A2A): a gated `tools/call` returns `URL_ELICITATION_REQUIRED` pointing at the consent surface, and a retried call resumes once the human has approved (`bridge/mcp/server.py`, `bridge/mcp/hitl.py`). With no HITL gate wired the surface stays read-only.
 - Dispatcher-level scope enforcement: a caller's bearer scopes are checked against the tool's `required_scopes` before HITL routing, so a `tasks.read` bearer cannot execute non-HITL writes (`create_task`, `update_task`) or even reach the HITL gate for `delete_task`. See `tests/e2e/test_scope_enforcement.py`.
 - `binding_message` is part of the signed canonical bytes (CANONICAL.md `binding_message`). A bridge that renders one summary on the consent page but signs different bytes fails Vault verification; see `tests/e2e/test_three_layer_enforcement.py::test_vault_rejects_binding_message_swap`.
 
@@ -67,7 +67,7 @@ Three tests carry most of the design's weight and are short enough to read direc
 
 - `tests/e2e/test_three_layer_enforcement.py` exercises Layer 1 (Vault verify-before-mint) and Layer 3 (RS independent verify) through code. Layer 2, the dispatcher's structural pass-through, is asserted by code inspection - what this file tests is Layer 3 catching mutation if it occurred, the defence-in-depth fallback.
 - `tests/e2e/test_dispatcher_vault_integration.py::test_tier2_attacker_without_user_secret_cannot_forge_a_new_signature` exercises the production-shape Zero-Trust property: an attacker without the user signing key cannot forge a signature for a new action. The HS256 demo configuration is materially weaker than the WebAuthn-bound production shape, and the docs say so where it matters.
-- `tests/e2e/test_mcp_hitl_building_blocks.py` exercises the translation + consent + Vault + RS composition for the MCP HITL flow. It does not drive the MCP server's `tools/call` → `elicitation/create` wire (that emission is documented as a next step in "Limitations and non-goals"), but it shows that the building blocks compose correctly.
+- `tests/e2e/test_mcp_elicitation_emission.py` drives the real MCP server over the SDK's in-memory client/server harness: a HITL-gated `tools/call` emits a URL-mode elicitation (`URL_ELICITATION_REQUIRED`) at the consent surface, and a retried call resumes after approval to mint + execute (target deleted, bystander untouched). `tests/unit/test_mcp_hitl_gate.py` covers the `McpHitlGate` emit/resume primitive directly. `tests/e2e/test_mcp_hitl_building_blocks.py` remains as the by-hand composition of the same building blocks.
 
 ---
 
@@ -158,7 +158,7 @@ python -m bridge.cli demo all
 ## Tests
 
 ```bash
-pytest                       # all (114 tests; protocol/e2e/integration tests need [mcp] extras)
+pytest                       # all (139 tests; protocol/e2e/integration tests need [mcp] extras)
 pytest tests/unit            # Vault, RS, canonical fixtures, translation, registry
 pytest tests/e2e             # three-layer enforcement, drift, MCP HITL building blocks
 pytest tests/protocol        # MCP server, consent server, MCP read filter
@@ -207,7 +207,7 @@ Properties the architecture commits to but the bundled demo stops short of fully
 - **Independent consent surface (production deployment shape).** Constraint 3 above is a property of *deployment topology* and the demo cannot deliver it on its own: the demo's URL-mode consent server runs on the bridge for self-containedness. In production with WebAuthn / Passkey, the bridge ships JS that builds the canonical bytes the user's signer signs — so a hostile bridge can render "Read email" while composing bytes for "Delete database." The fix is to put the consent surface on an authorization server in a separate trust domain from the bridge, so the user signs what the AS displays, not what the bridge displays. This is the standard FAPI 2.0 deployment shape.
 - **No approver-authorization policy.** `PolicyDenied` is defined as a typed exception but never raised by either Vault. `approver_id` is carried through the signed payload and JWT `sub` for attribution, not for enforcement. A production AS would consult an RBAC/ABAC policy here.
 - **MCP bearer auth is authentication-only at the transport.** `bridge/mcp/auth.py` constructs a `CallerIdentity` from a valid bearer (carrying the scopes the `TokenStore` issued the token with). Scope-vs-tool enforcement happens at the dispatcher (`bridge/core/dispatcher.py`, exercised by `tests/e2e/test_scope_enforcement.py`), not at the transport. Any non-MCP surface that bypasses the dispatcher (e.g. a future direct A2A executor) must apply the same `required_scopes` check itself.
-- **MCP elicitation emission is not bundled.** The reference includes the `tools/list` + `tools/call` (read-only) wiring and the URL-mode consent server, but server-side emission of an MCP `elicitation/create` event on a HITL-gated tool call is not yet implemented in `bridge/mcp/server.py`. The building-blocks integration test (`tests/e2e/test_mcp_hitl_building_blocks.py`) demonstrates the translation, consent, Vault, and RS composition by hand. Wiring the elicitation primitive into the MCP server is the natural next step.
+- ~~**MCP elicitation emission is not bundled.**~~ *Closed:* `bridge/mcp/server.py` now emits a URL-mode elicitation (`URL_ELICITATION_REQUIRED`) on a HITL-gated `tools/call` and resumes on retry via `bridge/mcp/hitl.py` (`McpHitlGate`). This is the single-agent secure-approval path over MCP, with no A2A. Gated tools surface only through an explicit `MCP_HITL_ALLOWLIST` and only when the gate (consent store + Vault) is wired; otherwise the surface stays read-only. Exercised by `tests/e2e/test_mcp_elicitation_emission.py` and `tests/unit/test_mcp_hitl_gate.py`. *Demo-grade caveats still apply*: the consent surface runs in-process (see "Independent consent surface" above) and the resume correlation is derived from `(caller, command, args)`.
 
 ---
 

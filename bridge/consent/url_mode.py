@@ -198,8 +198,22 @@ class ConsentStore:
         rar_type: str,
         approver_id: str,
         binding_message: str,
+        session_id: str | None = None,
     ) -> ConsentRequest:
-        session_id = secrets.token_urlsafe(16)
+        """Create (or return the existing) consent request for ``session_id``.
+
+        ``session_id`` defaults to a fresh random token (the A2A flow, where
+        the bridge mints an opaque elicitation id). The single-agent MCP gate
+        passes a *deterministic* id derived from ``(caller, command, args)`` so
+        a retried ``tools/call`` self-correlates to the same pending consent;
+        in that case a create for an id that already exists is idempotent and
+        returns the existing request rather than overwriting it.
+        """
+        session_id = session_id or secrets.token_urlsafe(16)
+        with self._lock:
+            existing = self._requests.get(session_id)
+            if existing is not None:
+                return existing
         action = ProposedAction.create(
             session_id=session_id,
             command=command,
@@ -210,6 +224,9 @@ class ConsentStore:
         )
         req = ConsentRequest(action=action)
         with self._lock:
+            existing = self._requests.get(session_id)
+            if existing is not None:
+                return existing
             self._requests[session_id] = req
         return req
 

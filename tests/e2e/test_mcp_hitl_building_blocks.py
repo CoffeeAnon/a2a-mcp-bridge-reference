@@ -1,11 +1,13 @@
 """End-to-end composition test for the MCP HITL flow's *building blocks*.
 
 **Scope:** this test composes the translation dataclasses, the
-consent server, the Vault, and the RS *by hand* - it does NOT exercise
-the MCP server's tools/call → elicitation/create wire. The
-server-side MCP elicitation emission (the natural next step beyond
-the current ``bridge.mcp.server``) is not bundled in the reference;
-see README "Limitations and non-goals" - *"MCP elicitation emission is not bundled"*.
+consent server, the Vault, and the RS *by hand* - it does not drive the
+MCP server's ``tools/call`` wire. That wire IS now bundled: the
+single-agent emission + resume path through the real MCP server is
+exercised by ``tests/e2e/test_mcp_elicitation_emission.py`` (and the
+``McpHitlGate`` primitive by ``tests/unit/test_mcp_hitl_gate.py``). This
+test remains as the by-hand composition of the same building blocks - it
+shows the pieces compose independently of the server harness.
 
 What this test proves:
 

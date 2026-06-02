@@ -10,7 +10,7 @@ import pytest
 
 from bridge import tools as tools_module
 from bridge.tools import SPECS_BY_NAME, TOOL_SPECS, ToolSpec
-from bridge.mcp.tools import MCP_V1_ALLOWLIST, mcp_tool_specs
+from bridge.mcp.tools import MCP_HITL_ALLOWLIST, MCP_V1_ALLOWLIST, mcp_tool_specs
 
 
 def test_allowlist_contains_only_read_tools():
@@ -31,6 +31,48 @@ def test_mcp_tool_specs_includes_reads():
     exposed = {s.name for s in mcp_tool_specs()}
     assert "list_tasks" in exposed
     assert "get_task" in exposed
+
+
+def test_default_mcp_tool_specs_excludes_hitl_tools():
+    """With no HITL gate wired (the default), the surface stays read-only:
+    even an explicitly HITL-allowlisted tool like delete_task is not exposed."""
+    exposed = {s.name for s in mcp_tool_specs(include_hitl=False)}
+    assert "delete_task" not in exposed
+
+
+def test_hitl_inclusion_exposes_allowlisted_gated_tool():
+    """When the gate is wired (include_hitl=True), a gated tool that is
+    explicitly in MCP_HITL_ALLOWLIST IS exposed - it's callable through the
+    URL-mode elicitation flow. Reads are still exposed."""
+    assert "delete_task" in MCP_HITL_ALLOWLIST
+    exposed = {s.name for s in mcp_tool_specs(include_hitl=True)}
+    assert "delete_task" in exposed
+    assert "list_tasks" in exposed and "get_task" in exposed
+
+
+def test_hitl_inclusion_still_excludes_gated_tool_not_in_hitl_allowlist(monkeypatch):
+    """include_hitl exposes ONLY gated tools in MCP_HITL_ALLOWLIST. A gated
+    tool absent from that allowlist stays hidden even with include_hitl=True."""
+    rogue = ToolSpec(
+        name="rogue_destructive",
+        description="should not surface on MCP",
+        parameters={"type": "object", "properties": {}},
+        cli_name="rogue-destructive",
+        requires_approval=True,
+        rar_type="rogue",
+    )
+    monkeypatch.setattr(tools_module, "TOOL_SPECS", TOOL_SPECS + [rogue])
+    monkeypatch.setattr("bridge.mcp.tools.TOOL_SPECS", tools_module.TOOL_SPECS)
+    # Put it on the READ allowlist but NOT the HITL allowlist.
+    monkeypatch.setattr(
+        "bridge.mcp.tools.MCP_V1_ALLOWLIST",
+        frozenset(MCP_V1_ALLOWLIST | {"rogue_destructive"}),
+    )
+    exposed = {s.name for s in mcp_tool_specs(include_hitl=True)}
+    assert "rogue_destructive" not in exposed, (
+        "a gated tool not in MCP_HITL_ALLOWLIST must never surface, even with "
+        "the gate wired and even if it leaks onto the read allowlist"
+    )
 
 
 def test_defense_in_depth_rejects_hitl_tool_added_to_allowlist(monkeypatch):

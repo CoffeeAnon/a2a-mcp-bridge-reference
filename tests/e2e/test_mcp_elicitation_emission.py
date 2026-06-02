@@ -1,0 +1,123 @@
+"""Server-side MCP URL-mode elicitation emission + resume.
+
+Drives the actual ``build_mcp_app`` MCP server over the SDK's in-memory
+client/server harness (no HTTP handshake) and asserts the single-agent
+HITL loop end to end:
+
+  - a HITL-gated ``tools/call`` makes the server emit a URL-mode
+    elicitation (``-32042`` / ``URL_ELICITATION_REQUIRED``) pointing at the
+    independent consent surface, and
+  - after the human approves at that surface, a retried ``tools/call``
+    resumes: the bridge mints a Vault credential and executes, deleting the
+    approved task and leaving the bystander untouched.
+
+This is the single-agent path - no A2A. The A2A multi-agent carrier is a
+separate composition; here the only hop is MCP-host -> consent surface ->
+back.
+"""
+import pytest
+
+pytest.importorskip("mcp")
+
+import anyio  # noqa: E402
+from mcp import types as mcp_types  # noqa: E402
+from mcp.shared.exceptions import McpError  # noqa: E402
+from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
+from starlette.testclient import TestClient  # noqa: E402
+
+from bridge.audit import AuditSink  # noqa: E402
+from bridge.auth.hmac import TokenStore  # noqa: E402
+from bridge.consent.url_mode import ConsentStore, build_consent_app  # noqa: E402
+from bridge.core.client import InMemoryTaskStore  # noqa: E402
+from bridge.core.dispatcher import Dispatcher  # noqa: E402
+from bridge.mcp.invoker import InProcessInvoker  # noqa: E402
+from bridge.mcp.server import build_mcp_app  # noqa: E402
+from bridge.vault import InProcessVault  # noqa: E402
+
+import bridge.commands  # noqa: F401, E402  (register commands before dispatch)
+
+
+SECRET = "mcp-elicit-emission-secret-32bytes-pad"
+RAR_TYPE = "tasktracker_task_action"
+USER_SECRET = SECRET  # demo: consent server signs with the same secret the Vault verifies
+
+
+def _world(tmp_path):
+    audit = AuditSink(str(tmp_path / "audit.db"))
+    token_store = TokenStore(str(tmp_path / "tokens.json"))
+    store = InMemoryTaskStore()
+    target = store.create(title="Q2 launch checklist")
+    bystander = store.create(title="Q3 onboarding doc")
+    vault = InProcessVault(secret=SECRET)
+    dispatcher = Dispatcher(client=store, vault=vault)
+    invoker = InProcessInvoker(dispatcher)
+    consent_store = ConsentStore()
+    app = build_mcp_app(
+        invoker=invoker,
+        audit=audit,
+        token_store=token_store,
+        secret=SECRET,
+        consent_store=consent_store,
+        vault=vault,
+        rar_type=RAR_TYPE,
+        bridge_base_url="https://bridge.example",
+    )
+    return {
+        "app": app, "store": store, "consent_store": consent_store,
+        "vault": vault, "target": target, "bystander": bystander,
+    }
+
+
+def test_hitl_tool_call_emits_url_mode_elicitation(tmp_path):
+    w = _world(tmp_path)
+    target_id = w["target"]["task_id"]
+
+    async def run():
+        async with create_connected_server_and_client_session(w["app"].server) as client:
+            with pytest.raises(McpError) as exc:
+                await client.call_tool("delete_task", {"task_id": target_id})
+            err = exc.value.error
+            assert err.code == mcp_types.URL_ELICITATION_REQUIRED
+            elicitations = err.data["elicitations"]
+            assert len(elicitations) == 1
+            el = elicitations[0]
+            assert el["mode"] == "url"
+            assert el["url"].endswith(f"/consent/{el['elicitationId']}")
+            # The server created a pending consent session for that id.
+            assert w["consent_store"].get(el["elicitationId"]) is not None
+
+    anyio.run(run)
+
+
+def test_resume_after_approval_executes_the_approved_action(tmp_path):
+    w = _world(tmp_path)
+    target_id = w["target"]["task_id"]
+    bystander_id = w["bystander"]["task_id"]
+    # The human's consent surface, over the SAME store the server emits into.
+    consent = TestClient(
+        build_consent_app(store=w["consent_store"], user_signing_secret=USER_SECRET)
+    )
+
+    async def run():
+        async with create_connected_server_and_client_session(w["app"].server) as client:
+            # 1. First call → URL-mode elicitation; grab the consent session id.
+            with pytest.raises(McpError) as exc:
+                await client.call_tool("delete_task", {"task_id": target_id})
+            sid = exc.value.error.data["elicitations"][0]["elicitationId"]
+
+            # 2. Human visits the consent page and approves (demo signs server-side).
+            assert consent.get(f"/consent/{sid}").status_code == 200
+            assert consent.post(
+                f"/consent/{sid}/submit", data={"decision": "approve"}
+            ).status_code == 200
+
+            # 3. Retry the same call → bridge resumes: mint + execute.
+            result = await client.call_tool("delete_task", {"task_id": target_id})
+            assert result.isError is False
+
+            # 4. The approved action ran; the bystander was untouched.
+            remaining = {t["task_id"] for t in w["store"].list()}
+            assert target_id not in remaining
+            assert bystander_id in remaining
+
+    anyio.run(run)
