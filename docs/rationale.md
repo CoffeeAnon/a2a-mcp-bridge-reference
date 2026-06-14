@@ -4,7 +4,7 @@ This document captures the *why* behind the design. The companion `architecture.
 
 ## Four necessary and sufficient constraints
 
-A bridge that lets an LLM call destructive tools through a human-in-the-loop check has to hold four properties at once. Each is independent of the others and each fails in a specific way if missing. Together they are sufficient for the design's goal: *every change to data is approved by a named human, and the approval is verifiable from an audit log alone.*
+A bridge that lets an LLM call destructive tools through a human-in-the-loop (HITL) check has to hold four properties at once. Each is independent of the others and each fails in a specific way if missing. Together they are sufficient for the design's goal: *every change to data is approved by a named human, and the approval is verifiable from an audit log alone.*
 
 1. **Parameter-Bound Intent.** The human's signature is computed over the canonical bytes of the exact command and arguments that will run. Without this, the LLM can swap arguments after approval (the "drift attack") and the system has no way to notice.
 2. **Consent Atomicity.** One signed payload mints at most one credential. Without this, a captured signed payload (leaked WebSocket frame, compromised relay, hostile bridge holding the bytes) can be replayed to mint N credentials for the same action within the signed-payload TTL - one approval, N executions.
@@ -15,7 +15,7 @@ The reference closes constraints 1, 2, and 4 in code. Constraint 3 is a deployme
 
 ## The security core and the two paths
 
-The four constraints come from one core: a human signs the exact `(command, args)`, an authorization server (Vault) mints a single-use credential bound to those bytes, and the resource server refuses anything else. That core is where the security comes from. A2A is not part of it. A2A is one way to carry a signed approval between processes, and the guarantee that the approval means what it says comes from the Vault binding, not from the transport.
+The four constraints come from one core: a human signs the exact `(command, args)`, an authorization server (Vault) mints a single-use credential bound to those bytes, and the resource server refuses anything else. The security comes from that core, not from A2A. A2A is one way to carry a signed approval between processes, and the guarantee that the approval means what it says comes from the Vault binding, not from the transport.
 
 What varies between deployments is not how many agents are involved, but whether the signed approval stays inside one agent's own domain or has to cross into another's. The reference answers two questions on that axis.
 
@@ -38,9 +38,9 @@ The rest of this section covers the core that both paths share, then the carrier
 2. **Bridge cannot alter** what the Vault minted: a JWT pinned to the approved parameters. (Structural property of the dispatcher's pass-through, asserted by code inspection.)
 3. **Resource server validates** the credential's `authorization_details` claim against the live request, with its own consumed-jti state. Constraint 4 (destination gating).
 
-The bridge sits in the data path of every authorization decision but in the trust path of none of them. This is the RAR-shaped pattern (RFC 9396 per-action `authorization_details` + per-action mint + RS enforcement) adapted from open-banking FAPI 2.0 deployments to agent authorization. FAPI 2.0 layers further mechanisms on top (mTLS, DPoP, PAR) that this reference does not implement - the *core* RAR-binding pattern is what it draws on.
+The bridge sits in the data path of every authorization decision but in the trust path of none of them. This is the Rich Authorization Requests (RAR) pattern (RFC 9396 per-action `authorization_details` + per-action mint + RS enforcement) adapted from open-banking FAPI 2.0 deployments to agent authorization. FAPI 2.0 layers further mechanisms on top (mTLS, DPoP, PAR) that this reference does not implement - the *core* RAR-binding pattern is what it draws on.
 
-**Layer asymmetry.** Layers 2 and 3 are mutually independent: a bug in either does not compromise the other. Layer 1 is the trust root for the human-signature property. The RS has no path to re-verify the human's HMAC (it is not in the JWT claims), so an `OAuthVault` bug that mints without verifying the human signature would not be caught downstream. Read carefully: Layers 2 and 3 protect what happens *after* mint; Layer 1 protects whether mint should have happened at all.
+**Layer asymmetry.** Layers 2 and 3 are mutually independent: a bug in either does not compromise the other. Layer 1 is the trust root for the human-signature property. The RS has no path to re-verify the human's HMAC (it is not in the JWT claims), so an `OAuthVault` bug that mints without verifying the human signature would not be caught downstream. Layers 2 and 3 protect what happens *after* mint; Layer 1 protects whether mint should have happened at all.
 
 ### Constraint 3: Independent consent surface in production
 
@@ -48,7 +48,7 @@ Constraints 1, 2, and 4 are properties of code. Constraint 3 is a property of *d
 
 The demo's URL-mode consent server (`bridge/consent/url_mode.py`) runs on the bridge process so the reference is self-contained. In that configuration, the `ProposedAction` is `frozen=True` + `MappingProxyType`, so the display and the signed bytes come from the same immutable record - the demo cannot drift the display by construction. The `binding_message` is also part of the canonical bytes, so even in a richer in-process configuration, a render-vs-sign drift produces a signature the Vault rejects (`tests/e2e/test_three_layer_enforcement.py::test_vault_rejects_binding_message_swap`).
 
-What none of those defences cover: a production deployment with WebAuthn / Passkey at the user, where the bridge ships JavaScript to the user's browser. The JS computes canonical bytes for the action and calls `navigator.credentials.get(...)` with that as the challenge. A hostile bridge can render "Read email" HTML while composing canonical bytes for "Delete database" and generating a matching `binding_message`. The user's signer signs honestly; the user was deceived. The signature verifies. The credential mints.
+What none of those defences cover: a production deployment with WebAuthn / Passkey at the user, where the bridge ships JavaScript to the user's browser. The JS computes canonical bytes for the action and calls `navigator.credentials.get(...)` with that as the challenge. A hostile bridge can render "Read email" HTML while composing canonical bytes for "Delete database" and generating a matching `binding_message`. The user's signer signs honestly even though the user was deceived, so the signature verifies and the credential mints.
 
 The architectural fix is to put the consent surface in a different trust domain from the bridge - a separate authorization-server-hosted consent page that parses and renders the raw `(command, args)` itself, independent of any HTML the bridge supplies. The user's signer is then signing what the AS displays, not what the bridge displays. This is the standard FAPI 2.0 deployment shape and is the production form constraint 3 requires.
 
@@ -75,7 +75,7 @@ Most published bridges sit at Tier 0; going to Tier 1 closes the dominant threat
 | Prompt injection / LLM drift | ❌ | ✅ | ✅ |
 | Agent-process compromise | ❌ | ❌ | ✅ |
 | Infrastructure required | None | None (one shared secret) | Vault, RAR-aware RS, OAuth client |
-| Reference implements | — | `InProcessVault` | `OAuthVault` + `JwtResourceServer` |
+| Reference implements | none | `InProcessVault` | `OAuthVault` + `JwtResourceServer` |
 
 ## The interactive last-mile
 
@@ -85,7 +85,7 @@ IBM Verify frames this as the **agentic last-mile problem**: the gap between hig
 
 **The bridge resolves this gap by turning the human into the Vault's dynamic policy engine.** Instead of asking the Vault to evaluate a contextual destructive action from static attributes alone, the bridge intercepts the agent's `auth_required` event, surfaces the proposed action to the human via MCP elicitation, and accepts a signed RAR payload as the human's *just-in-time* policy decision. The Vault no longer guesses - it mints single-use tokens backed by explicit human delegation for exactly the operation the human approved.
 
-This is what makes the bridge non-redundant with a Vault. The Vault gives you Zero Trust enforcement - the bridge gives you *interactive* Zero Trust enforcement.
+A Vault enforces Zero Trust over decisions a static policy can encode in advance. The bridge adds *interactive* Zero Trust: the same enforcement for the contextual, human-approved actions an LLM proposes that no static policy can anticipate.
 
 ## Related work
 
