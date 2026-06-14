@@ -52,7 +52,7 @@ Python's `json.dumps` defaults to `ensure_ascii=True`, which emits non-ASCII cha
 
 Example with `approver_id = "alïce@example.com"` (note the `ï`, U+00EF):
 
-- Python (canonical, reference behaviour): emits `alïce@example.com` - the ASCII-escape form.
+- Python (canonical, reference behaviour): emits `al\u00efce@example.com` - the ASCII-escape form.
 - JavaScript `JSON.stringify` (NON-canonical by default): emits the raw `ï` as UTF-8 bytes `0xc3 0xaf`.
 
 These produce *different* byte strings, *different* HMACs, and the verifier will reject the JS-signed token as `SignatureMismatch`. JavaScript signers either need to use a JSON library with an `ensure_ascii`/`ascii_only` option, or post-process the JSON output to escape every code point > U+007F. Surrogate pairs for code points above U+FFFF must be emitted as two `\uXXXX` escapes per RFC 8259.
@@ -111,28 +111,30 @@ args = {"task_id": "t-42"}
 rar_type = "tasktracker_task_action"
 exp = 1779315522
 approver_id = "alice@example.com"
+binding_message = "Delete the task t-42 (Q2 launch checklist)?"
 ```
 
 Canonical bytes (Python):
 
 ```python
 canonical_authorization_bytes("delete-task", {"task_id": "t-42"},
-                              "tasktracker_task_action", 1779315522, "alice@example.com")
-# b'{"approver_id":"alice@example.com","args":{"task_id":"t-42"},"cmd":"delete-task","exp":1779315522,"rar_type":"tasktracker_task_action"}'
+                              "tasktracker_task_action", 1779315522, "alice@example.com",
+                              "Delete the task t-42 (Q2 launch checklist)?")
+# b'{"approver_id":"alice@example.com","args":{"task_id":"t-42"},"binding_message":"Delete the task t-42 (Q2 launch checklist)?","cmd":"delete-task","exp":1779315522,"rar_type":"tasktracker_task_action"}'
 ```
 
-Note: top-level keys are emitted alphabetically (`approver_id` < `args` < `cmd` < `exp` < `rar_type`).
+Note: top-level keys are emitted alphabetically (`approver_id` < `args` < `binding_message` < `cmd` < `exp` < `rar_type`).
 
 With `user_signing_key = "demo-user-signing-secret"` (a fixture value used to pin the canonical output for cross-language signer verification - NEVER use this string as a real deployment secret):
 
 ```python
 import hmac, hashlib
-canonical = b'{"approver_id":"alice@example.com","args":{"task_id":"t-42"},"cmd":"delete-task","exp":1779315522,"rar_type":"tasktracker_task_action"}'
+canonical = b'{"approver_id":"alice@example.com","args":{"task_id":"t-42"},"binding_message":"Delete the task t-42 (Q2 launch checklist)?","cmd":"delete-task","exp":1779315522,"rar_type":"tasktracker_task_action"}'
 sig = hmac.new(b"demo-user-signing-secret", canonical, hashlib.sha256).hexdigest()
-# 'e48f9b6667df5269adeb35cfd09459ebfd424eb5b48a0ddd3ed911b9198988a1'
+# 'e91237e52b6c56d67926fcb6415f24c59e8f42db47ffbe0241c2adcf152bf70a'
 ```
 
-This fixture is encoded in `tests/unit/test_canonical_fixtures.py` and the test suite verifies the Python implementation produces these exact bytes and signature.
+This fixture is encoded as fixture 1 in `tests/unit/test_canonical_fixtures.py` and the test suite verifies the Python implementation produces these exact bytes and signature.
 
 ## What the reference does NOT enforce
 

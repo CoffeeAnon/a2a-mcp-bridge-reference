@@ -83,7 +83,7 @@ The central architectural claim, three independent enforcement layers, is exerci
 
 The bridge is in the data path of all three layers but in the trust path of none of them.
 
-**Asymmetry worth surfacing.** Layers 2 and 3 are mutually independent - a bug in either does not compromise the other. **Layer 1 is the trust root for the human-signature property**: the RS has no access to the human's HMAC (it's not embedded in the minted JWT's claims), so an `OAuthVault` bug that mints without verifying the human signature is *not* caught downstream. The threat-model row "Vault compromise - out of scope" acknowledges this trust-root status. Read this way, Layers 2 and 3 protect *what happens after mint*; Layer 1 protects *whether mint should have happened at all*.
+**Layer asymmetry.** Layers 2 and 3 are mutually independent - a bug in either does not compromise the other. **Layer 1 is the trust root for the human-signature property**: the RS has no access to the human's HMAC (it's not embedded in the minted JWT's claims), so an `OAuthVault` bug that mints without verifying the human signature is *not* caught downstream. The threat-model row "Vault compromise - out of scope" acknowledges this trust-root status. Layers 2 and 3 protect *what happens after mint*; Layer 1 protects *whether mint should have happened at all*.
 
 ## HITL flow walkthroughs
 

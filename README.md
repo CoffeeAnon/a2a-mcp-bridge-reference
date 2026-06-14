@@ -3,7 +3,7 @@
 > [!WARNING]
 > **Reference implementation only, not a production template.** This codebase exists to illustrate the RAR / Vault / HITL patterns and the A2A↔MCP translation shape. It deliberately omits standard substrate concerns (consent-server authentication, CSRF protection, durable session/token storage, OWASP-class hardening) so the architectural mechanics stay readable. Copying this repo as-is into production would ship something insecure. See "Limitations and non-goals" and `SECURITY.md` for the explicit list of what is intentionally out of scope.
 
-A reference implementation of a **stateful, HITL-aware, parameter-bound** bridge between [A2A](https://a2a-protocol.org) and [MCP](https://modelcontextprotocol.io), the two emerging protocols for agent-to-agent and LLM-host-to-tool communication.
+A reference implementation of a **stateful, HITL-aware** (human-in-the-loop), **parameter-bound** bridge between [A2A](https://a2a-protocol.org) and [MCP](https://modelcontextprotocol.io), the two emerging protocols for agent-to-agent and LLM-host-to-tool communication.
 
 ## The four necessary and sufficient constraints
 
@@ -18,7 +18,7 @@ The reference closes constraints 1, 2, and 4 in code. Constraint 3 is a deployme
 
 ### The security core and the two paths
 
-Those four constraints come from one core: a human signs the exact `(command, args)`, an authorization server (Vault) mints a single-use credential bound to those bytes, and the resource server refuses anything else. That core is where the security comes from. A2A is not part of it. A2A is one way to carry a signed approval between processes, and the guarantee that the approval means what it says comes from the Vault binding, not from the transport.
+Those four constraints come from one core: a human signs the exact `(command, args)`, an authorization server (Vault) mints a single-use credential bound to those bytes, and the resource server refuses anything else. The security comes from that core, not from A2A. A2A is one way to carry a signed approval between processes, and the guarantee that the approval means what it says comes from the Vault binding, not from the transport.
 
 What varies between deployments is not how many *agents* are involved, but whether the signed approval stays inside one agent's own domain or has to cross into another's. The reference answers two questions on that axis:
 
@@ -27,7 +27,7 @@ What varies between deployments is not how many *agents* are involved, but wheth
 
 So the A2A↔MCP translation this reference ships is the carrier for the multi-domain case. It is not the source of the security property, and it is not needed for the single-domain case at all.
 
-Underneath both questions is one delegation pattern: every destructive action is approved by a human signing the *specific* `authorization_details` payload (RFC 9396 RAR shape); the signature drives the Vault to mint a single-use, action-scoped credential; the Vault refuses to mint twice from the same signed payload; and an independent resource server validates the credential against the live request. The agent process holds no persistent destructive credentials.
+Underneath both questions is one delegation pattern: every destructive action is approved by a human signing the *specific* `authorization_details` payload (RFC 9396's Rich Authorization Requests shape, or RAR); the signature drives the Vault to mint a single-use, action-scoped credential; the Vault refuses to mint twice from the same signed payload; and an independent resource server validates the credential against the live request. The agent process holds no persistent destructive credentials.
 
 The reference ships two tiers behind a single `Vault` Protocol:
 
@@ -36,7 +36,7 @@ The reference ships two tiers behind a single `Vault` Protocol:
 
 ---
 
-## What this reference is — and what it isn't
+## What the reference demonstrates
 
 This repo is a reference architecture and executable demo of the building blocks, not a secure reference implementation. The architectural shape (protocol translation, three-layer enforcement, parameter-bound credentials, canonical-form signing contract) is exercised through real code. Several properties the contract names are framing-only in the bundled demo and must be added before production use.
 
@@ -69,7 +69,7 @@ The code is organised so it can be read in five short passes. Each pass builds o
 
 If you plan to write a non-Python signer, `bridge/vault/CANONICAL.md` is the byte-level contract.
 
-### Tests worth reading
+### Three tests to read
 
 Three tests carry most of the design's weight and are short enough to read directly:
 
@@ -212,7 +212,7 @@ Properties the architecture commits to but the bundled demo stops short of fully
 - **HS256 reference** uses a shared symmetric secret between Vault and RS. In production the Vault would sign with a private key and the RS would verify with the corresponding public key (RS256/ES256 + JWKS). The reference's separated RS demonstrates the architectural property - the symmetric-key limitation means RS compromise yields mint capability in this configuration.
 - **Demo-mode signer co-location.** `bridge.consent.demo_signer` produces the user signature on the server side because the demo cannot launch a separate user-key custodian, signing directly over the stored `ProposedAction` rather than accepting a client-submitted payload. A production Tier-2 deployment must (a) move signing client-side (WebAuthn / Passkey) and never hold the user signing key in the bridge process, and (b) when the client submits the signed payload back, verify that the payload's `(command, args, rar_type, approver_id)` matches the stored `ProposedAction` before forwarding to `Vault.mint`. The demo's server-side signing skips this step because it cannot drift by construction. The production shape can drift and must check.
 - **In-memory consumed-jti set.** Both `OAuthVault` and `JwtResourceServer` track single-use state in process memory. A Vault/RS restart inside the JWT TTL discards the record. Production deployments must back this with a durable TTL-aware store (sqlite, Redis). Tier 1 is structurally closed against this because `_issued` is also process-local (post-restart credentials fail at `SignatureMismatch`, not as replays).
-- **Independent consent surface (production deployment shape).** Constraint 3 above is a property of *deployment topology* and the demo cannot deliver it on its own: the demo's URL-mode consent server runs on the bridge for self-containedness. In production with WebAuthn / Passkey, the bridge ships JS that builds the canonical bytes the user's signer signs — so a hostile bridge can render "Read email" while composing bytes for "Delete database." The fix is to put the consent surface on an authorization server in a separate trust domain from the bridge, so the user signs what the AS displays, not what the bridge displays. This is the standard FAPI 2.0 deployment shape.
+- **Independent consent surface (production deployment shape).** Constraint 3 above is a property of *deployment topology* and the demo cannot deliver it on its own: the demo's URL-mode consent server runs on the bridge for self-containedness. In production with WebAuthn / Passkey, the bridge ships JS that builds the canonical bytes the user's signer signs, so a hostile bridge can render "Read email" while composing bytes for "Delete database." The fix is to put the consent surface on an authorization server in a separate trust domain from the bridge, so the user signs what the AS displays, not what the bridge displays. This is the standard FAPI 2.0 deployment shape.
 - **No approver-authorization policy.** `PolicyDenied` is defined as a typed exception but never raised by either Vault. `approver_id` is carried through the signed payload and JWT `sub` for attribution, not for enforcement. A production AS would consult an RBAC/ABAC policy here.
 - **MCP bearer auth is authentication-only at the transport.** `bridge/mcp/auth.py` constructs a `CallerIdentity` from a valid bearer (carrying the scopes the `TokenStore` issued the token with). Scope-vs-tool enforcement happens at the dispatcher (`bridge/core/dispatcher.py`, exercised by `tests/e2e/test_scope_enforcement.py`), not at the transport. Any non-MCP surface that bypasses the dispatcher (e.g. a future direct A2A executor) must apply the same `required_scopes` check itself.
 - ~~**MCP elicitation emission is not bundled.**~~ *Closed:* `bridge/mcp/server.py` now emits a URL-mode elicitation (`URL_ELICITATION_REQUIRED`) on a HITL-gated `tools/call` and resumes on retry via `bridge/mcp/hitl.py` (`McpHitlGate`). This is the single-agent secure-approval path over MCP, with no A2A. Gated tools surface only through an explicit `MCP_HITL_ALLOWLIST` and only when the gate (consent store + Vault) is wired; otherwise the surface stays read-only. Exercised by `tests/e2e/test_mcp_elicitation_emission.py` and `tests/unit/test_mcp_hitl_gate.py`. *Demo-grade caveats still apply*: the consent surface runs in-process (see "Independent consent surface" above) and the resume correlation is derived from `(caller, command, args)`.
