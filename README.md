@@ -1,5 +1,7 @@
 # A2A↔MCP Bridge Reference
 
+**What this is:** AI agents increasingly need to take real, irreversible actions — delete a record, move money, send a message — on a person's behalf. The hard part is guaranteeing that a *named human* approved the *specific* action that runs, provably from an audit log alone, even if the agent is prompt-injected or compromised. This repository is a working reference implementation of that guarantee: it names the four properties such a system must hold and implements them in ~2,000 lines of tested Python, using the two emerging agent protocols (A2A and MCP) to carry a human's cryptographically-bound approval across agent boundaries. For a more in-depth writeup, see the [blog series](https://coffee-anon.com/posts/).
+
 > [!WARNING]
 > **Reference implementation only, not a production template.** This codebase exists to illustrate the RAR / Vault / HITL patterns and the A2A↔MCP translation shape. It deliberately omits standard substrate concerns (consent-server authentication, CSRF protection, durable session/token storage, OWASP-class hardening) so the architectural mechanics stay readable. Copying this repo as-is into production would ship something insecure. See "Limitations and non-goals" and `SECURITY.md` for the explicit list of what is intentionally out of scope.
 
