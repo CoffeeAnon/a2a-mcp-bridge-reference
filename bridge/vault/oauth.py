@@ -57,6 +57,7 @@ from bridge.vault.interface import (
     WrongAudience,
 )
 from bridge.vault.in_process import canonical_authorization_bytes
+from bridge.vault.durable_state import DurableReplayState
 
 
 # ── Construction-time guards ────────────────────────────────────────────────
@@ -245,6 +246,7 @@ class OAuthVault(Vault):
         audience: str = "bridge-resource-server",
         expected_rar_type: str | None = None,
         max_signed_payload_ttl_seconds: int = DEFAULT_MAX_SIGNED_PAYLOAD_TTL_SECONDS,
+        durable_state: "DurableReplayState | None" = None,
     ) -> None:
         # Guardrail: empty/short secrets are a misconfiguration that
         # silently accepts attacker-signed tokens. Reject at construction.
@@ -264,6 +266,7 @@ class OAuthVault(Vault):
         self._max_ttl = max_signed_payload_ttl_seconds
         self._consumed: set[str] = set()
         self._consumed_signatures: set[str] = set()
+        self._durable_state = durable_state
         self._lock = threading.Lock()
 
     def mint(self, signed: SignedAuthorizationDetails) -> MintedCredential:
@@ -315,13 +318,27 @@ class OAuthVault(Vault):
         #    of the same signed payload cannot both succeed. Runs after
         #    structural validation (signature, rar_type, exp) so an invalid
         #    payload cannot poison the set.
-        with self._lock:
-            if signature_hash in self._consumed_signatures:
+        #
+        #    Durable branch: when a shared ``DurableReplayState`` is injected,
+        #    the atomic claim in the DB is the authority, so two *replicas*
+        #    racing on the same signed payload cannot both mint.
+        if self._durable_state is not None:
+            first = self._durable_state.claim_signature(
+                signature_hash, expired_at=float(signed.exp)
+            )
+            if not first:
                 raise SignatureReplay(
                     "signed payload already exchanged for a credential; "
                     "one signature = one credential = one execution"
                 )
-            self._consumed_signatures.add(signature_hash)
+        else:
+            with self._lock:
+                if signature_hash in self._consumed_signatures:
+                    raise SignatureReplay(
+                        "signed payload already exchanged for a credential; "
+                        "one signature = one credential = one execution"
+                    )
+                self._consumed_signatures.add(signature_hash)
 
         # 5. Construct the access-token claims. The shape mirrors how a
         #    real OAuth+RAR access token would look - a resource server
@@ -381,10 +398,13 @@ class OAuthVault(Vault):
         # regardless of whether the replay also drifts the parameters.
         # Matches the check order in ``InProcessVault.consume``.
         jti = claims.get("jti", "")
-        with self._lock:
-            if jti in self._consumed:
+        if self._durable_state is not None:
+            # Durable consume: the shared store is the single-use authority,
+            # so a JWT consumed on one replica is rejected on another (and
+            # after a restart) even though ``_consumed`` is local. Order
+            # mirrors the in-memory path: replay, then binding, then rar_type.
+            if self._durable_state.is_jti_consumed(jti):
                 raise CredentialReplay(f"jti={jti} already consumed")
-
             if ad.get("command") != command:
                 raise CredentialDrift(
                     f"token bound to command={ad.get('command')!r}, live command={command!r}"
@@ -397,8 +417,28 @@ class OAuthVault(Vault):
                 raise CredentialDrift(
                     f"token rar_type={ad.get('type')!r} != expected {self._expected_rar_type!r}"
                 )
+            first = self._durable_state.claim_jti(jti, expired_at=float(exp))
+            if not first:
+                raise CredentialReplay(f"jti={jti} already consumed")
+        else:
+            with self._lock:
+                if jti in self._consumed:
+                    raise CredentialReplay(f"jti={jti} already consumed")
 
-            self._consumed.add(jti)
+                if ad.get("command") != command:
+                    raise CredentialDrift(
+                        f"token bound to command={ad.get('command')!r}, live command={command!r}"
+                    )
+                if ad.get("args") != args:
+                    raise CredentialDrift(
+                        f"token bound to args={ad.get('args')!r}, live args={args!r}"
+                    )
+                if self._expected_rar_type is not None and ad.get("type") != self._expected_rar_type:
+                    raise CredentialDrift(
+                        f"token rar_type={ad.get('type')!r} != expected {self._expected_rar_type!r}"
+                    )
+
+                self._consumed.add(jti)
 
         return MintedCredential(
             credential=credential,

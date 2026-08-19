@@ -40,6 +40,7 @@ from bridge.vault.interface import (
     SignedAuthorizationDetails,
     Vault,
 )
+from bridge.vault.durable_state import DurableReplayState
 
 
 _DEFAULT_MAX_SIGNED_PAYLOAD_TTL_SECONDS = 600  # see bridge/vault/oauth.py
@@ -193,6 +194,7 @@ class InProcessVault(Vault):
         secret: str,
         expected_rar_type: str | None = None,
         max_signed_payload_ttl_seconds: int = _DEFAULT_MAX_SIGNED_PAYLOAD_TTL_SECONDS,
+        durable_state: "DurableReplayState | None" = None,
     ) -> None:
         from bridge.vault.oauth import _require_nonempty_secret
         _require_nonempty_secret("secret", secret)
@@ -204,6 +206,7 @@ class InProcessVault(Vault):
         self._consumed: set[str] = set()
         self._consumed_signatures: set[str] = set()
         self._issued: dict[str, MintedCredential] = {}
+        self._durable_state = durable_state
         self._lock = threading.Lock()
 
     def mint(self, signed: SignedAuthorizationDetails) -> MintedCredential:
@@ -245,6 +248,12 @@ class InProcessVault(Vault):
         #    ``_issued`` so two concurrent presentations of the same signed
         #    payload cannot both produce a credential. Runs after structural
         #    validation so an invalid payload cannot poison the set.
+        #
+        #    Two substrates, one contract: when a shared ``DurableReplayState``
+        #    is injected the check-and-record is delegated to it (atomic in the
+        #    DB, so two *replicas* racing on the same payload cannot both win);
+        #    otherwise the in-process set is used. The local ``_issued`` record
+        #    always stays (Tier 1 needs it at consume for the binding check).
         signature_hash = hashlib.sha256(canonical).hexdigest()
         jti = secrets.token_hex(8)
         credential = f"{signed.signature}.{jti}"
@@ -255,6 +264,18 @@ class InProcessVault(Vault):
             exp=signed.exp,
             jti=jti,
         )
+        if self._durable_state is not None:
+            first = self._durable_state.claim_signature(
+                signature_hash, expired_at=float(signed.exp)
+            )
+            if not first:
+                raise SignatureReplay(
+                    "signed payload already exchanged for a credential; "
+                    "one signature = one credential = one execution"
+                )
+            with self._lock:
+                self._issued[jti] = minted
+            return minted
         with self._lock:
             if signature_hash in self._consumed_signatures:
                 raise SignatureReplay(
@@ -271,10 +292,47 @@ class InProcessVault(Vault):
         except ValueError as exc:
             raise MalformedCredential("Tier-1 credential must be 'signature.jti'") from exc
 
+        # The Tier-1 issuance record (``_issued``) is process-local, and the
+        # durable store deliberately does NOT duplicate it: Tier 1's
+        # cross-replica guarantee is at *mint* time (one signature = one
+        # credential, enforced by the shared signature table), not at consume
+        # time. A credential minted on replica A and presented to replica B
+        # has no local issuance record here, so it fails ``SignatureMismatch``
+        # — exactly the documented restart behaviour. (Cross-replica *consume*
+        # single-use is guaranteed at the Resource Server for the self-
+        # contained Tier-2 JWTs.)
         with self._lock:
             minted = self._issued.get(jti)
             if minted is None:
                 raise SignatureMismatch("credential jti was not issued by this Vault")
+
+        if self._durable_state is not None:
+            # Durable consume: the shared store is the single-use authority.
+            # Order mirrors the in-memory path (replay, then expired, then
+            # binding) so a replayed/Drifted/Expired credential reports the
+            # same reason it would under the in-memory baseline. The atomic
+            # claim at the end is the load-bearing cross-replica decision; the
+            # pre-checks are for stable, drift-independent messages.
+            if self._durable_state.is_jti_consumed(jti):
+                raise CredentialReplay(f"credential {jti} already consumed")
+            if time.time() > minted.exp:
+                raise CredentialExpired(f"credential {jti} expired")
+            if minted.command != command:
+                raise CredentialDrift(
+                    f"credential bound to command={minted.command!r}, live command={command!r}"
+                )
+            if minted.args != args:
+                raise CredentialDrift(
+                    f"credential bound to args={minted.args!r}, live args={args!r}"
+                )
+            first = self._durable_state.claim_jti(jti, expired_at=float(minted.exp))
+            if not first:
+                # Lost the race: another replica/attempt consumed it first.
+                raise CredentialReplay(f"credential {jti} already consumed")
+            return minted
+
+        # In-memory path — unchanged behaviour.
+        with self._lock:
             if jti in self._consumed:
                 raise CredentialReplay(f"credential {jti} already consumed")
 

@@ -51,6 +51,7 @@ from bridge.vault.interface import (
     WrongAudience,
 )
 from bridge.vault.oauth import _audience_matches, jwt_decode
+from bridge.vault.durable_state import DurableReplayState
 
 
 # ── RS-level outcomes ───────────────────────────────────────────────────────
@@ -117,6 +118,7 @@ class JwtResourceServer:
         expected_audience: str,
         client: Any,
         expected_rar_type: str | None = None,
+        durable_state: "DurableReplayState | None" = None,
     ) -> None:
         from bridge.vault.oauth import _require_nonempty_secret
         _require_nonempty_secret("verification_secret", verification_secret)
@@ -130,6 +132,7 @@ class JwtResourceServer:
         self._expected_rar_type = expected_rar_type
         self._client = client
         self._consumed: set[str] = set()
+        self._durable_state = durable_state
         self._lock = threading.Lock()
 
     def execute(self, command: str, args: dict, credential: str) -> RsOutcome:
@@ -190,6 +193,29 @@ class JwtResourceServer:
         ad = ad_list[0]
 
         jti = claims.get("jti", "")
+        if self._durable_state is not None:
+            # Durable consume: the shared store is the single-use authority, so
+            # a JWT consumed on RS-A is rejected on RS-B (and after a restart)
+            # even though ``_consumed`` is local. Order mirrors the in-memory
+            # path: single-use before binding.
+            if self._durable_state.is_jti_consumed(jti):
+                raise CredentialReplay(f"jti={jti} already consumed by RS")
+            if ad.get("command") != command:
+                raise CredentialDrift(
+                    f"token bound to command={ad.get('command')!r}, RS asked for {command!r}"
+                )
+            if ad.get("args") != args:
+                raise CredentialDrift(
+                    f"token bound to args={ad.get('args')!r}, RS asked for {args!r}"
+                )
+            if self._expected_rar_type is not None and ad.get("type") != self._expected_rar_type:
+                raise CredentialDrift(
+                    f"token rar_type={ad.get('type')!r} != RS expected {self._expected_rar_type!r}"
+                )
+            first = self._durable_state.claim_jti(jti, expired_at=float(int(claims.get("exp", 0))))
+            if not first:
+                raise CredentialReplay(f"jti={jti} already consumed by RS")
+            return jti
         with self._lock:
             if jti in self._consumed:
                 raise CredentialReplay(f"jti={jti} already consumed by RS")

@@ -7,6 +7,7 @@ Two implementations of the same ``Vault`` Protocol:
 See ``docs/rationale.md`` for the three-tier
 graduation and ``docs/architecture.md`` for component flows.
 """
+from bridge.vault.durable_state import DurableReplayState
 from bridge.vault.in_process import InProcessVault, sign_authorization_details
 from bridge.vault.interface import (
     CredentialDrift,
@@ -30,6 +31,7 @@ __all__ = [
     "CredentialDrift",
     "CredentialExpired",
     "CredentialReplay",
+    "DurableReplayState",
     "InProcessVault",
     "MalformedCredential",
     "MintedCredential",
