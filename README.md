@@ -198,12 +198,12 @@ Every guarantee above is stated per-process. Most of them stay true when you run
 
 Single-use is the exception, and it is the only one. "This payload has already been used" is not a property of the payload; it is a fact one process happens to remember. Two replicas each hold their own memory of it, so a captured signed payload rejected by replica A is accepted by replica B, and one human approval becomes two executions. A restart inside the TTL is the same failure with one replica and two points in time.
 
-This is not a new weakness introduced by scaling out — it is the same in-memory set the single-process demo always had, meeting a topology that reveals it. Two things make it worth naming rather than filing under substrate concerns:
+This is not a new weakness introduced by scaling out - it is the same in-memory set the single-process demo always had, meeting a topology that reveals it. Two things make it worth naming rather than filing under substrate concerns:
 
 - **A stateless HTTP transport makes horizontal scale the default deployment, not an advanced one.** When no session pins a client to a replica, a retry lands wherever the load balancer sends it. Round-robin across N replicas is the ordinary configuration, and it is exactly the configuration in which a process-local replay set silently stops being a guard.
 - **The failure is invisible.** Nothing errors. Both replicas verify the signature correctly, mint correctly, and execute correctly. The audit log records two well-formed, human-approved executions of an action the human approved once. There is no log line to alert on, which is why this belongs in the security model rather than in an operations note.
 
-So storage locality is a security boundary here, not a performance choice. `bridge/vault/durable_state.py` is the seam: pass one `DurableReplayState` to every Vault and RS in the deployment and the single-use decision moves from N private sets to one atomic `INSERT OR IGNORE` against a shared file. The kwarg is optional and defaults to `None`, which keeps the single-process demo dependency-free — and means a multi-replica deployment that forgets to pass it has the hole. Sizing, purge, and the shared-storage locking requirement are covered in "Known production gaps" below.
+So storage locality is a security boundary here, not a performance choice. The `bridge/vault/durable_state.py` module is the seam: pass one `DurableReplayState` to every Vault and RS in the deployment and the single-use decision moves from N private sets to one atomic `INSERT OR IGNORE` against a shared file. The kwarg is optional and defaults to `None`, which keeps the single-process demo dependency-free, meaning a multi-replica deployment that omits the shared state retains the vulnerability. Sizing, purge, and the shared-storage locking requirement are covered in "Known production gaps" below.
 
 ---
 
