@@ -61,14 +61,7 @@ from bridge.vault.interface import (
     require_nonempty_secret,
 )
 
-# ── Construction-time guards ────────────────────────────────────────────────
-
-# Secret-strength validation lives on ``bridge.vault.interface`` as
-# ``require_nonempty_secret`` / ``MIN_SECRET_BYTES``, shared by both Vaults and
-# the resource server. Rejecting at construction means a misconfigured
-# deployment (empty env var, default placeholder, a short test literal copied
-# into production) fails loudly instead of silently accepting attacker-signed
-# tokens.
+# ── Policy defaults ─────────────────────────────────────────────────────────
 
 DEFAULT_MAX_SIGNED_PAYLOAD_TTL_SECONDS = 600
 """Maximum acceptable lifetime for a signed RAR payload at the Vault.
@@ -98,8 +91,6 @@ def _audience_matches(claim_aud, expected: str) -> bool:
     if isinstance(claim_aud, list):
         return expected in claim_aud
     return False
-
-
 
 
 # ── Minimal HS256 JWT primitives (stdlib only) ───────────────────────────────
@@ -250,13 +241,10 @@ class OAuthVault(Vault):
         self._audience = audience
         self._expected_rar_type = expected_rar_type
         self._max_ttl = max_signed_payload_ttl_seconds
-        # One seam, chosen once: process-local sets, or the shared store when
-        # the deployment supplies one. Everything below this line is written
-        # against the registry contract and never branches on which it got.
         self._replay: SingleUseRegistry = durable_state or InMemorySingleUseRegistry()
 
     def mint(self, signed: SignedAuthorizationDetails) -> MintedCredential:
-        # 1. Verify the human's HMAC over the signed authorization-details.
+        # Verify the human's HMAC over the signed authorization-details.
         canonical = canonical_authorization_bytes(
             signed.command, signed.args, signed.rar_type,
             signed.exp, signed.approver_id, signed.binding_message,
@@ -269,25 +257,17 @@ class OAuthVault(Vault):
         if not hmac.compare_digest(expected, signed.signature):
             raise SignatureMismatch("human signature verification failed")
 
-        # 1b. Mint-replay check: refuse to mint twice from the same signed
-        #     payload. Closes the surface where one human signature could
-        #     otherwise be exchanged for N distinct, valid credentials
-        #     within the signed-payload TTL. The hash is over the canonical
-        #     bytes (not the signature alone) so an attacker cannot collide
-        #     by mutating exp etc. - any difference flips the hash.
+        # Hash the canonical bytes, not the signature alone: any mutation of
+        # exp or args flips the hash, so a near-miss cannot collide with it.
         signature_hash = hashlib.sha256(canonical).hexdigest()
 
-        # 2. Validate the rar_type if configured.
+        # Validate the rar_type if configured.
         if self._expected_rar_type is not None and signed.rar_type != self._expected_rar_type:
             raise PayloadDriftAtMint(
                 f"unexpected rar_type: {signed.rar_type!r} != {self._expected_rar_type!r}"
             )
 
-        # 3. Enforce signer-side `exp` bounds. The Vault is the policy
-        #    point for credential lifetime: a signer that proposes a
-        #    decade-long exp, or an already-expired exp, is rejected at
-        #    mint time. This is the Vault asserting its own contract,
-        #    not trusting the signer to set sensible TTLs.
+        # Bound the signer's exp; see DEFAULT_MAX_SIGNED_PAYLOAD_TTL_SECONDS.
         now = time.time()
         if signed.exp <= now:
             raise CredentialExpired(
@@ -299,21 +279,16 @@ class OAuthVault(Vault):
                 f"{self._max_ttl}s (would be {signed.exp - now:.0f}s out)"
             )
 
-        # 4. Claim the signature, then mint. The claim is atomic, so two
-        #    concurrent presentations of the same signed payload cannot both
-        #    succeed - within one process against the in-memory registry, and
-        #    across replicas against the shared one. Runs after structural
-        #    validation (signature, rar_type, exp) so an invalid payload
-        #    cannot poison the record.
+        # Claim last, after signature/rar_type/exp have all passed, so an
+        # invalid payload cannot poison the record it would be claimed under.
         if not self._replay.claim_signature(signature_hash, expired_at=float(signed.exp)):
             raise SignatureReplay(
                 "signed payload already exchanged for a credential; "
                 "one signature = one credential = one execution"
             )
 
-        # 5. Construct the access-token claims. The shape mirrors how a
-        #    real OAuth+RAR access token would look - a resource server
-        #    that knows the RAR `type` can consume this directly.
+        # The claim shape mirrors a real OAuth+RAR access token, so a resource
+        # server that knows the RAR `type` can consume this one directly.
         jti = secrets.token_hex(8)
         claims = {
             "iss": self._issuer,
@@ -364,10 +339,8 @@ class OAuthVault(Vault):
             raise MalformedCredential("token has no authorization_details claim")
         ad = ad_list[0]
 
-        # Single-use enforcement runs BEFORE parameter-binding checks: a
-        # replayed credential should be reported as ``CredentialReplay``
-        # regardless of whether the replay also drifts the parameters.
-        # Matches the check order in ``InProcessVault.consume``.
+        # Query single-use BEFORE the binding checks so a replayed credential
+        # reports as a replay even when it also drifts the parameters.
         jti = claims.get("jti", "")
         if self._replay.is_jti_consumed(jti):
             raise CredentialReplay(f"jti={jti} already consumed")
@@ -385,8 +358,6 @@ class OAuthVault(Vault):
                 f"token rar_type={ad.get('type')!r} != expected {self._expected_rar_type!r}"
             )
 
-        # The claim, not the query above, is the single-use authority: two
-        # callers can both pass the query and race here, and exactly one wins.
         if not self._replay.claim_jti(jti, expired_at=float(exp)):
             raise CredentialReplay(f"jti={jti} already consumed")
 

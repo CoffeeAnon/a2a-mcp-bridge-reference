@@ -148,8 +148,6 @@ class ConsentRequest:
     signed_payload: dict | None = None  # populated on successful submit
     denied: bool = False
 
-    # Convenience pass-throughs for templates / external readers; reading
-    # via the action attribute is also fine.
     @property
     def session_id(self) -> str:
         return self.action.session_id

@@ -135,9 +135,6 @@ class JwtResourceServer:
         self._expected_audience = expected_audience
         self._expected_rar_type = expected_rar_type
         self._client = client
-        # One seam, chosen once. For a self-contained Tier-2 JWT this record
-        # is the RS's only single-use backstop, which makes it the load-bearing
-        # place to share when more than one RS replica is serving.
         self._replay: SingleUseRegistry = durable_state or InMemorySingleUseRegistry()
 
     def execute(self, command: str, args: dict, credential: str) -> RsOutcome:

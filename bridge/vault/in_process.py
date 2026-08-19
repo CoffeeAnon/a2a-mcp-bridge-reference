@@ -207,17 +207,13 @@ class InProcessVault(Vault):
         self._secret = secret
         self._expected_rar_type = expected_rar_type
         self._max_ttl = max_signed_payload_ttl_seconds
-        # One seam, chosen once. Everything below is written against the
-        # registry contract and never branches on which implementation it got.
         self._replay: SingleUseRegistry = durable_state or InMemorySingleUseRegistry()
-        # Tier-1 issuance records stay process-local by design; see the class
-        # docstring. Their own lock, because they are separate state from the
-        # single-use record and the registry owns its own synchronisation.
+        # Its own lock: separate state from the registry, which locks itself.
         self._issued: dict[str, MintedCredential] = {}
         self._issued_lock = threading.Lock()
 
     def mint(self, signed: SignedAuthorizationDetails) -> MintedCredential:
-        # 1. Verify HMAC.
+        # Verify HMAC.
         canonical = canonical_authorization_bytes(
             signed.command, signed.args, signed.rar_type,
             signed.exp, signed.approver_id, signed.binding_message,
@@ -230,10 +226,7 @@ class InProcessVault(Vault):
         if not hmac.compare_digest(expected, signed.signature):
             raise SignatureMismatch("HMAC verification failed")
 
-        # 1b. Enforce signer-side `exp` bounds. The Vault is the policy
-        #     point for credential lifetime; a signer that proposes a
-        #     decade-long exp or an already-expired exp is rejected at
-        #     mint time.
+        # Bound the signer's exp; see _DEFAULT_MAX_SIGNED_PAYLOAD_TTL_SECONDS.
         now = time.time()
         if signed.exp <= now:
             raise CredentialExpired(
@@ -245,22 +238,14 @@ class InProcessVault(Vault):
                 f"{self._max_ttl}s (would be {signed.exp - now:.0f}s out)"
             )
 
-        # 2. Validate the rar_type if the Vault was configured with one.
+        # Validate the rar_type if the Vault was configured with one.
         if self._expected_rar_type is not None and signed.rar_type != self._expected_rar_type:
             raise PayloadDriftAtMint(
                 f"unexpected rar_type: {signed.rar_type!r} != {self._expected_rar_type!r}"
             )
 
-        # 3. Claim the signature, then mint. The claim is atomic, so two
-        #    concurrent presentations of the same signed payload cannot both
-        #    produce a credential - within one process, and across replicas
-        #    when the registry is the shared one. Runs after structural
-        #    validation so an invalid payload cannot poison the record.
-        #
-        #    ``_issued`` is recorded separately and always stays process-local:
-        #    Tier 1 needs it at consume for the binding check, and it is
-        #    deliberately not mirrored into a shared registry (see the class
-        #    docstring for where Tier 1's cross-replica guarantee lives).
+        # Claim last, after the structural checks, so an invalid payload
+        # cannot poison the record it would be claimed under.
         signature_hash = hashlib.sha256(canonical).hexdigest()
         if not self._replay.claim_signature(signature_hash, expired_at=float(signed.exp)):
             raise SignatureReplay(
@@ -286,15 +271,6 @@ class InProcessVault(Vault):
         except ValueError as exc:
             raise MalformedCredential("Tier-1 credential must be 'signature.jti'") from exc
 
-        # The Tier-1 issuance record (``_issued``) is process-local, and the
-        # durable store deliberately does NOT duplicate it: Tier 1's
-        # cross-replica guarantee is at *mint* time (one signature = one
-        # credential, enforced by the shared signature table), not at consume
-        # time. A credential minted on replica A and presented to replica B
-        # has no local issuance record here, so it fails ``SignatureMismatch``
-        # — exactly the documented restart behaviour. (Cross-replica *consume*
-        # single-use is guaranteed at the Resource Server for the self-
-        # contained Tier-2 JWTs.)
         with self._issued_lock:
             minted = self._issued.get(jti)
             if minted is None:
