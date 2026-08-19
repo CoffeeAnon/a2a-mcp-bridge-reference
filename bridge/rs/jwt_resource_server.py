@@ -148,19 +148,16 @@ class JwtResourceServer:
           5. command + args binding
           6. rar_type (defence in depth)
         """
-        # 1. structural + cryptographic
         try:
             claims = jwt_decode(credential, self._verification_secret)
         except (MalformedCredential, SignatureMismatch) as exc:
             return RsRejected(reason=type(exc).__name__, detail=str(exc))
 
-        # 2. temporal + identity
         try:
             self._validate_claims(claims)
         except (CredentialExpired, UnknownIssuer, WrongAudience) as exc:
             return RsRejected(reason=type(exc).__name__, detail=str(exc))
 
-        # 3-6. authorization_details + single-use + binding
         try:
             jti = self._consume_authorization_details(claims, command, args)
         except (
@@ -168,7 +165,6 @@ class JwtResourceServer:
         ) as exc:
             return RsRejected(reason=type(exc).__name__, detail=str(exc))
 
-        # All checks passed. Execute the underlying command.
         return self._execute_command(command, args, jti)
 
     # ── private validators ─────────────────────────────────────────────

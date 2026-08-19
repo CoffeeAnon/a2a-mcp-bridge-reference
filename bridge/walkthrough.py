@@ -106,7 +106,6 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
     print(f"{_DIM}A reference simulation of the sequence diagram in "
           f"the 'A2A' flow of `docs/architecture.md`.{_RESET}")
 
-    # Set up shared infrastructure.
     store = InMemoryTaskStore()
     target = store.create(title="Q2 launch checklist")
     bystander = store.create(title="Q3 onboarding doc")
@@ -124,7 +123,6 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
     dispatcher = Dispatcher(client=store, vault=vault)
     s = Stepper(pause=pause)
 
-    # ── 1: client sends initial A2A message ─────────────────────────────
     s.step("MCP host → Bridge",
            "POST /a2a  message:send (initial request, read-scope token)")
     _print_envelope("A2A request (initial)", {
@@ -141,7 +139,6 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
     })
     _note("Base token grants tasks.read only - insufficient for a destructive action.")
 
-    # ── 2: bridge validates token, LLM resolves the intent ─────────────
     s.step("Bridge → Dispatcher",
            "validate t-base, resolve intent → delete-task(task_id=...)")
     _success("base token validates against the agent's token store")
@@ -149,7 +146,6 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
           "tool call. In production this is a real LLM step; the walkthrough "
           "models it as a deterministic resolution.")
 
-    # ── 3: dispatch sees requires_approval, builds authorization_details ──
     s.step("Dispatcher → HITL gate",
            "delete-task spec.requires_approval=True → pause + build authorization_details")
     authorization_details = {
@@ -159,7 +155,6 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
     }
     _print_envelope("authorization_details (proposed)", authorization_details)
 
-    # ── 4: SSE auth_required event back to the client ──────────────────
     s.step("Bridge → MCP host",
            "SSE event: task_status_update state=auth_required")
     a2a_event = A2aAuthRequiredEvent(
@@ -200,7 +195,6 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
         },
     })
 
-    # ── 5: human reviews, approves, signs ──────────────────────────────
     s.step("Human (MCP host UI)",
            "review the binding message + authorization_details, approve, sign")
     signed = sign_authorization_details(
@@ -227,7 +221,6 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
         "signature": signed.signature[:32] + "…",
     })
 
-    # ── 6: client resumes via A2A message:send ─────────────────────────
     s.step("MCP host → Bridge",
            "elicitation/response (accept), translated back to A2A message:send")
     mcp_response = McpElicitationResponse(
@@ -262,12 +255,10 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
         },
     })
 
-    # ── 7: bridge verifies signature shape ─────────────────────────────
     s.step("Bridge → Bridge",
            "verify the signature is over the authorization_details we emitted")
     _success("signature is over the dispatcher's authorization_details, not a free-form payload")
 
-    # ── 8: bridge presents signed payload to Vault ─────────────────────
     s.step("Bridge → Vault",
            "present signed RAR for verification + minting")
     if tier == 2:
@@ -285,13 +276,11 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
     _success(f"Vault verified the human signature and minted credential jti={minted.jti}")
 
     if tier == 2:
-        # Show JWT structure for the OAuth tier.
         header_b64, body_b64, sig_b64 = minted.credential.split(".")
         import base64
         body = json.loads(base64.urlsafe_b64decode(body_b64 + "=" * (-len(body_b64) % 4)))
         _print_envelope("minted JWT (decoded body)", body)
 
-    # ── 9: dispatcher executes the action with the minted credential ────
     s.step("Bridge → Dispatcher",
            "resume graph; call delete-task with the Vault-minted credential")
     outcome = dispatcher.execute(
@@ -306,12 +295,10 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
         _reject(f"unexpected outcome: {type(outcome).__name__}")
         return 1
 
-    # ── 10: simulated RS response ──────────────────────────────────────
     s.step("Dispatcher → RS",
            f"DELETE /tasks/{target['task_id']}  (Bearer: minted credential)")
     _print_envelope("RS response", {"status": 204, "body": None})
 
-    # ── 11: SSE completed event ────────────────────────────────────────
     s.step("Bridge → MCP host",
            "SSE event: task_status_update state=completed")
     _print_envelope("SSE event", {
@@ -324,7 +311,6 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
         },
     })
 
-    # ── 12: post-conditions check ──────────────────────────────────────
     s.step("Walkthrough → Verify",
            "post-condition: target deleted, bystander survives, credential consumed")
     remaining = {t["task_id"] for t in store.list()}

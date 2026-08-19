@@ -213,7 +213,6 @@ class InProcessVault(Vault):
         self._issued_lock = threading.Lock()
 
     def mint(self, signed: SignedAuthorizationDetails) -> MintedCredential:
-        # Verify HMAC.
         canonical = canonical_authorization_bytes(
             signed.command, signed.args, signed.rar_type,
             signed.exp, signed.approver_id, signed.binding_message,
@@ -238,7 +237,6 @@ class InProcessVault(Vault):
                 f"{self._max_ttl}s (would be {signed.exp - now:.0f}s out)"
             )
 
-        # Validate the rar_type if the Vault was configured with one.
         if self._expected_rar_type is not None and signed.rar_type != self._expected_rar_type:
             raise PayloadDriftAtMint(
                 f"unexpected rar_type: {signed.rar_type!r} != {self._expected_rar_type!r}"

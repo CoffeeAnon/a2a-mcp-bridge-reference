@@ -35,7 +35,6 @@ from bridge.vault import Vault
 logger = logging.getLogger(__name__)
 
 
-# ContextVar used by the tool-call handler to attribute calls to the right caller.
 _CURRENT_CALLER: ContextVar[CallerIdentity | None] = ContextVar("mcp_current_caller", default=None)
 
 

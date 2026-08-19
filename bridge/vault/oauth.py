@@ -244,7 +244,6 @@ class OAuthVault(Vault):
         self._replay: SingleUseRegistry = durable_state or InMemorySingleUseRegistry()
 
     def mint(self, signed: SignedAuthorizationDetails) -> MintedCredential:
-        # Verify the human's HMAC over the signed authorization-details.
         canonical = canonical_authorization_bytes(
             signed.command, signed.args, signed.rar_type,
             signed.exp, signed.approver_id, signed.binding_message,
@@ -261,7 +260,6 @@ class OAuthVault(Vault):
         # exp or args flips the hash, so a near-miss cannot collide with it.
         signature_hash = hashlib.sha256(canonical).hexdigest()
 
-        # Validate the rar_type if configured.
         if self._expected_rar_type is not None and signed.rar_type != self._expected_rar_type:
             raise PayloadDriftAtMint(
                 f"unexpected rar_type: {signed.rar_type!r} != {self._expected_rar_type!r}"
@@ -315,7 +313,6 @@ class OAuthVault(Vault):
     def consume(self, credential: str, command: str, args: dict) -> MintedCredential:
         claims = jwt_decode(credential, self._mint_secret)
 
-        # exp check
         exp = int(claims.get("exp", 0))
         if time.time() > exp:
             raise CredentialExpired(f"jti={claims.get('jti')} expired")
@@ -333,7 +330,6 @@ class OAuthVault(Vault):
                 f"token aud={claims.get('aud')!r} does not match expected {self._audience!r}"
             )
 
-        # authorization_details presence
         ad_list = claims.get("authorization_details") or []
         if not ad_list:
             raise MalformedCredential("token has no authorization_details claim")

@@ -190,7 +190,6 @@ class Dispatcher:
 
             return self._execute_via_vault(command_name, kwargs, approval_token, cmd_cls)
 
-        # Non-HITL path: dispatcher executes locally.
         return self._execute_locally(command_name, kwargs, cmd_cls)
 
     # ── HITL execution paths ────────────────────────────────────────────
