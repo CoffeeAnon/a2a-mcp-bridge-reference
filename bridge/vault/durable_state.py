@@ -2,21 +2,18 @@
 
 Why this exists
 ---------------
-``InProcessVault``, ``OAuthVault``, and ``JwtResourceServer`` each enforce
-single-use ("one signature = one credential = one execution") with an
-**in-process** set:
+``InProcessVault``, ``OAuthVault``, and ``JwtResourceServer`` enforce single-use
+("one signature = one credential = one execution") through a
+``SingleUseRegistry``: a mint-time claim on the signed payload, and a
+consume-time claim on the credential's ``jti``.
 
-  - ``_consumed_signatures`` — mint-time guard: the same signed RAR payload
-    cannot be exchanged for two credentials.
-  - ``_consumed``            — consume-time guard: a minted credential's
-    ``jti`` cannot be consumed twice.
-
-Both are thread-safe *within one process* but (a) vanish on restart and (b)
-are **not shared across processes**. The card's #1 known trap is exactly this:
-``stateless=True`` does not make Vault replay state safe across replicas. Two
-bridge replicas, or a restart inside the 5-minute TTL, each start with an
-empty set, so a captured-but-not-yet-replayed signed payload or credential can
-be re-minted / re-consumed.
+The default implementation, ``InMemorySingleUseRegistry``, is thread-safe
+*within one process* but (a) vanishes on restart and (b) is **not shared across
+processes**. That is the trap ``stateless=True`` sets: a stateless transport
+does not make replay state safe across replicas. Two bridge replicas, or a
+restart inside the 5-minute TTL, each begin with an empty registry, so a
+captured-but-not-yet-replayed signed payload or credential can be re-minted or
+re-consumed.
 
 ``DurableReplayState`` is the shared substrate that closes that surface: a
 SQLite file that every replica and every post-restart process opens. The

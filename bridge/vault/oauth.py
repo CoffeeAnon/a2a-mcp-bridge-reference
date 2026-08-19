@@ -205,35 +205,22 @@ class OAuthVault(Vault):
     does not let an attacker mint tokens directly: they can still
     forge user signatures, but only the Vault can produce a valid JWT.
 
-    **Restart and cross-replica replay: closed by injection, open by
-    default.** With no ``durable_state``, the ``_consumed`` and
-    ``_consumed_signatures`` sets are in-process memory. A bridge restart
-    inside the 5-minute JWT TTL discards both records, so a
-    captured-but-not-replayed JWT becomes replayable until its ``exp``
-    passes, and a captured signed payload becomes re-mintable. The same
-    holds *between* replicas: two processes each start with empty sets, so
-    a payload rejected on replica A is accepted on replica B. Under a
-    stateless HTTP transport with round-robin load balancing that is the
-    normal topology, not an edge case.
-
-    Passing a ``DurableReplayState`` (``durable_state=``) moves both
-    decisions to a shared SQLite file where the claim is an atomic
-    ``INSERT OR IGNORE``, closing the restart *and* cross-replica windows.
-    It stays optional and defaults to ``None`` so the in-memory path is
-    byte-identical to the pre-existing behaviour, and it remains
-    stdlib-only. The store must live on locking-backed shared storage;
-    ``purge_expired`` is the operator's to schedule. A
-    ``JwtResourceServer`` deployed separately takes the same kwarg and
-    should be pointed at the same file.
-
-    **Mint-replay closure.** ``_consumed_signatures`` tracks
-    canonical-bytes hashes of signed payloads accepted at ``mint``. A
-    second presentation of the same signed payload raises
+    **Mint-replay closure.** A signed payload accepted at ``mint`` is
+    claimed, so a second presentation of the same payload raises
     ``SignatureReplay`` rather than producing a fresh credential. One
     human signature exchanges for one credential, and a captured signed
     payload cannot be replayed by an attacker holding the bytes. The
     contract is "fresh consent per execution," not just "fresh consent
     per action shape."
+
+    **How far that reaches is a deployment choice.** Both claims go to
+    whichever ``SingleUseRegistry`` this Vault was constructed with. The
+    default is process-local, which a restart inside the JWT TTL discards
+    and a second replica never had. Pass a shared ``DurableReplayState``
+    as ``durable_state`` -- and give the separately-deployed
+    ``JwtResourceServer`` the same one -- to make both claims span
+    restarts and replicas. ``bridge.vault.interface.SingleUseRegistry``
+    documents the contract and its limits.
     """
 
     def __init__(

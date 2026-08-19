@@ -164,41 +164,33 @@ def sign_authorization_details(
 
 
 class InProcessVault(Vault):
-    """Tier 1 Vault. Thread-safe single-use enforcement via an in-memory
-    consumed-jti set, or via a shared ``DurableReplayState`` when one is
-    passed as ``durable_state``; the contract is identical either way.
+    """Tier 1 Vault: single-use enforcement against a ``SingleUseRegistry``,
+    process-local by default and shared when a ``DurableReplayState`` is
+    passed as ``durable_state``. The contract is identical either way.
 
-    **Where Tier 1's cross-replica guarantee lives.** Sharing state moves
-    the *mint* decision across replicas: one signed payload exchanges for
-    one credential no matter which replica sees it. The *consume*
-    decision stays process-local by design, because Tier 1 verifies a
-    credential against its own ``_issued`` record rather than against a
-    self-contained token — so a credential minted on replica A and
-    presented to replica B fails as ``SignatureMismatch`` ("not issued by
-    this Vault"), not as a replay. That is a rejection either way. The
-    cross-replica *consume* guarantee belongs to Tier 2, where the JWT is
-    self-contained and the resource server holds the shared consumed-jti
-    state.
+    **Mint-replay closure.** A signed payload accepted at ``mint`` is
+    claimed, so a second presentation raises ``SignatureReplay`` rather
+    than producing a fresh credential. One human signature exchanges for
+    one credential.
 
-    **Restart-replay note.** Unlike Tier 2, Tier 1 holds the credential's
-    *issuance* record (``_issued``) in the same process as ``_consumed``.
-    A restart loses both. Post-restart, replays fail with
-    ``SignatureMismatch`` ("jti was not issued by this Vault") because
-    the issuance record is also gone - the restart-replay window that
-    affects Tier 2 (where the JWT is self-contained) is structurally
-    closed at Tier 1. The trade-off is availability: post-restart,
-    legitimate-but-unused credentials are also unverifiable. For Tier 1
-    that is acceptable because the human can re-approve within the
-    5-minute TTL.
+    **Where Tier 1's cross-replica guarantee lives.** Sharing the registry
+    moves the *mint* decision across replicas: one signed payload, one
+    credential, whichever replica sees it. The *consume* decision stays
+    process-local by design, because Tier 1 verifies a credential against
+    its own ``_issued`` record rather than against a self-contained token.
+    A credential minted on replica A and presented to replica B therefore
+    fails as ``SignatureMismatch`` ("not issued by this Vault") rather
+    than as a replay. Both are rejections. Cross-replica *consume* is a
+    Tier-2 property, delivered at the resource server where the JWT
+    carries its own claims.
 
-    **Mint-replay closure.** ``_consumed_signatures`` tracks canonical-bytes
-    hashes of signed payloads accepted at ``mint``. A second presentation
-    of the same signed payload raises ``SignatureReplay`` rather than
-    producing a fresh credential. One human signature exchanges for one
-    credential. The same restart caveat as ``_consumed`` applies: a Tier-1
-    restart loses the set, but it also loses ``_issued``, so a replayed
-    payload post-restart fails at the issuance check rather than the
-    signature-replay check.
+    **Restart behaviour follows from the same fact.** A restart drops
+    ``_issued`` along with any process-local claims, so a post-restart
+    replay fails at the issuance check rather than the replay check. The
+    Tier-2 restart-replay window is structurally closed here, at the cost
+    of availability: legitimate-but-unused credentials are also
+    unverifiable after a restart. Acceptable at Tier 1, because the human
+    can re-approve inside the 5-minute TTL.
     """
 
     def __init__(

@@ -3,11 +3,9 @@
 Uses mcp.server.lowlevel.Server with explicit Tool definitions so each
 ToolSpec's JSON Schema travels through verbatim without signature inference.
 
-SDK version: mcp 2.0.0
-Import paths confirmed against that version:
-  - mcp.server.lowlevel.Server
-  - mcp.server.streamable_http_manager.StreamableHTTPSessionManager
-  - mcp.types (Tool, ListToolsResult, CallToolResult, etc.)
+Requires mcp >= 2.0, enforced by the ``mcp`` extra in pyproject.toml rather
+than asserted here: a version written in prose goes stale silently, whereas a
+dependency floor fails the install.
 """
 from __future__ import annotations
 
@@ -39,26 +37,6 @@ logger = logging.getLogger(__name__)
 
 # ContextVar used by the tool-call handler to attribute calls to the right caller.
 _CURRENT_CALLER: ContextVar[CallerIdentity | None] = ContextVar("mcp_current_caller", default=None)
-
-
-# Two failure kinds, two wire shapes. MCP separates them deliberately and the
-# distinction is not cosmetic:
-#
-#   * The tool RAN and failed  -> a CallToolResult with is_error=True. It is a
-#     *result*, so the model receives the failure text as tool output and can
-#     reason about it (retry with different arguments, tell the user, give up).
-#   * The request was malformed -> a JSON-RPC error. The call never happened;
-#     there is nothing for the model to act on, and the client's transport
-#     layer is the right place to surface it.
-#
-# Getting this backwards is easy to miss because both "look like errors" in a
-# transcript. Under mcp 1.x the `@server.call_tool()` decorator papered over it
-# by catching every handler exception and converting it to an is_error result.
-# Registering handlers directly (mcp 2.0) removes that safety net: a raised
-# exception now becomes a JSON-RPC error, and on the modern 2026-07-28 envelope
-# `runner.modern_error_data()` additionally replaces any non-MCPError with a
-# bare "Internal server error", discarding the message. So the handler below
-# RETURNS tool failures and RAISES only genuine protocol faults.
 
 
 def _authenticated_mcp_asgi(session_manager, token_store: TokenStore, secret: str):
@@ -224,12 +202,23 @@ def build_mcp_app(
     specs_by_name = {s.name: s for s in mcp_tool_specs(include_hitl=gate is not None)}
 
     async def _call_tool(ctx, req: mcp_types.CallToolRequestParams) -> mcp_types.CallToolResult:
+        """Run one tool call. Returns tool failures; raises protocol faults.
+
+        That split is the contract, and it is not cosmetic. A tool that ran and
+        failed is a *result* the model can act on. A malformed request is a
+        transport-level fault with nothing for the model to do about it.
+
+        Raising is easy to reach for because both read as "an error", and under
+        mcp 1.x the ``@server.call_tool()`` decorator hid the difference by
+        converting every handler exception into an is_error result. Registering
+        handlers directly removes that safety net, and on the modern
+        2026-07-28 envelope a raised non-``MCPError`` is replaced wholesale by
+        "Internal server error", losing the message. Return failures. Raise only
+        ``MCPError`` subclasses, which carry their own wire data.
+        """
         arguments = req.arguments or {}
         spec = specs_by_name.get(req.name)
         if spec is None:
-            # Protocol fault: the client named a tool that tools/list never
-            # offered. MCPError carries its own ErrorData, so the code and the
-            # message survive on every transport and protocol era.
             raise MCPError(
                 code=mcp_types.INVALID_PARAMS,
                 message=f"Unknown tool: {req.name}",
@@ -242,9 +231,6 @@ def build_mcp_app(
 
         _write_audit_row(audit, caller, req.name, arguments, result)
 
-        # The tool ran. Report success or failure as tool output so the
-        # caller's model can act on the message, rather than raising and
-        # turning a recoverable tool failure into a transport-level fault.
         return mcp_types.CallToolResult(
             content=[mcp_types.TextContent(type="text", text=result.content or "")],
             is_error=not result.ok,

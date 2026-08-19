@@ -23,7 +23,12 @@ bridge = "bridge.cli:main"
 # Anthropic MCP SDK. Required if you want to expose the protocol
 # endpoints; the CLI demos run without it.
 mcp = [
-    "mcp>=1.0",
+    # 2.0 is a floor, not a preference. The server registers handlers with
+    # `add_request_handler` and uses MCPError / CallToolResult.is_error, none of
+    # which exist in 1.x (which had the @server.call_tool decorator, McpError,
+    # and isError). An install that resolved to 1.x would satisfy the old
+    # `>=1.0` constraint and then fail at import.
+    "mcp>=2.0",
     "starlette>=0.37",
     "uvicorn>=0.30",
     "python-multipart>=0.0.9",   # required by Starlette's form parsing in bridge.consent.url_mode
