@@ -31,8 +31,8 @@ A system that mediates destructive tool execution through human authorization mu
 
 | Constraint | Enforcement Mechanism | Failure Mode if Omitted |
 | :--- | :--- | :--- |
-| **1. Parameter-Bound Intent** | Signatures computed over RFC 8259 canonical bytes containing `(cmd, args, rar_type, exp, approver_id, binding_message)` | **Parameter Drift Attack**: An agent modifies arguments after obtaining human approval, executing an unauthorized mutation under an approved umbrella. |
-| **2. Consent Atomicity** | Authorization server records canonical payload hashes and enforces single-token issuance per signature | **Mint Replay Attack**: An intermediary or compromised agent captures a signed payload and mints multiple credentials, turning one human approval into multiple executions. |
+| **1. Parameter-Bound Intent** | Signatures computed over the canonical byte string specified in `bridge/vault/CANONICAL.md`, covering `(cmd, args, rar_type, exp, approver_id, binding_message)` | **Parameter Drift Attack**: An agent modifies arguments after obtaining human approval, executing an unauthorized mutation under an approved umbrella. |
+| **2. Consent Atomicity** | Authorization server records canonical payload hashes and enforces single-token issuance per signature | **Mint Replay Attack**: An intermediary or compromised agent captures a signed payload and mints multiple credentials within the signed-payload TTL, turning one human approval into multiple executions. |
 | **3. Independent Consent Surface** | User consent interface runs in an isolated trust domain separate from the agent orchestration environment | **Display Deception**: A compromised agent displays benign text to the human while passing destructive parameters to the signer. |
 | **4. Destination Gating** | Resource server verifies authorization token and parameter match on all mutation endpoints | **Direct API Bypass**: An agent discovers the direct resource server endpoint and executes state modifications without interacting with the bridge. |
 
