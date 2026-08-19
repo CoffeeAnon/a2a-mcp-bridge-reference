@@ -19,10 +19,12 @@ import pytest
 
 pytest.importorskip("mcp")
 
+import contextlib
 import anyio  # noqa: E402
 from mcp import types as mcp_types  # noqa: E402
-from mcp.shared.exceptions import McpError  # noqa: E402
-from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
+from mcp.client.session import ClientSession  # noqa: E402
+from mcp.shared.exceptions import MCPError as McpError  # noqa: E402
+from mcp.shared.memory import create_client_server_memory_streams  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 from bridge.audit import AuditSink  # noqa: E402
@@ -40,6 +42,19 @@ import bridge.commands  # noqa: F401, E402  (register commands before dispatch)
 SECRET = "mcp-elicit-emission-secret-32bytes-pad"
 RAR_TYPE = "tasktracker_task_action"
 USER_SECRET = SECRET  # demo: consent server signs with the same secret the Vault verifies
+
+
+@contextlib.asynccontextmanager
+async def connected_client(server):
+    async with create_client_server_memory_streams() as ((client_read, client_write), (server_read, server_write)):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(server.run, server_read, server_write, server.create_initialization_options())
+            async with ClientSession(client_read, client_write) as client:
+                await client.initialize()
+                try:
+                    yield client
+                finally:
+                    tg.cancel_scope.cancel()
 
 
 def _world(tmp_path):
@@ -73,18 +88,20 @@ def test_hitl_tool_call_emits_url_mode_elicitation(tmp_path):
     target_id = w["target"]["task_id"]
 
     async def run():
-        async with create_connected_server_and_client_session(w["app"].server) as client:
+        async with connected_client(w["app"].server) as client:
             with pytest.raises(McpError) as exc:
                 await client.call_tool("delete_task", {"task_id": target_id})
-            err = exc.value.error
-            assert err.code == mcp_types.URL_ELICITATION_REQUIRED
-            elicitations = err.data["elicitations"]
+            err_code = exc.value.code
+            err_data = exc.value.data
+            assert err_code == mcp_types.URL_ELICITATION_REQUIRED
+            elicitations = err_data["elicitations"]
             assert len(elicitations) == 1
             el = elicitations[0]
             assert el["mode"] == "url"
-            assert el["url"].endswith(f"/consent/{el['elicitationId']}")
+            sid = el.get("elicitationId") or el.get("elicitation_id")
+            assert el["url"].endswith(f"/consent/{sid}")
             # The server created a pending consent session for that id.
-            assert w["consent_store"].get(el["elicitationId"]) is not None
+            assert w["consent_store"].get(sid) is not None
 
     anyio.run(run)
 
@@ -99,11 +116,12 @@ def test_resume_after_approval_executes_the_approved_action(tmp_path):
     )
 
     async def run():
-        async with create_connected_server_and_client_session(w["app"].server) as client:
+        async with connected_client(w["app"].server) as client:
             # 1. First call → URL-mode elicitation; grab the consent session id.
             with pytest.raises(McpError) as exc:
                 await client.call_tool("delete_task", {"task_id": target_id})
-            sid = exc.value.error.data["elicitations"][0]["elicitationId"]
+            el = exc.value.data["elicitations"][0]
+            sid = el.get("elicitationId") or el.get("elicitation_id")
 
             # 2. Human visits the consent page and approves (demo signs server-side).
             assert consent.get(f"/consent/{sid}").status_code == 200
@@ -113,7 +131,7 @@ def test_resume_after_approval_executes_the_approved_action(tmp_path):
 
             # 3. Retry the same call → bridge resumes: mint + execute.
             result = await client.call_tool("delete_task", {"task_id": target_id})
-            assert result.isError is False
+            assert (getattr(result, "is_error", None) or getattr(result, "isError", None)) is not True
 
             # 4. The approved action ran; the bystander was untouched.
             remaining = {t["task_id"] for t in w["store"].list()}

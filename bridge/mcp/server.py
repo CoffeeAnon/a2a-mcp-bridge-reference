@@ -105,21 +105,25 @@ def build_mcp_app(
         else None
     )
 
-    @server.list_tools()
-    async def _list_tools() -> list[mcp_types.Tool]:
-        return [
-            mcp_types.Tool(
-                name=spec.name,
-                description=spec.description,
-                inputSchema=spec.parameters,
-            )
-            for spec in mcp_tool_specs(include_hitl=gate is not None)
-        ]
+    async def _list_tools(ctx, req: mcp_types.PaginatedRequestParams) -> mcp_types.ListToolsResult:
+        return mcp_types.ListToolsResult(
+            tools=[
+                mcp_types.Tool(
+                    name=spec.name,
+                    description=spec.description,
+                    inputSchema=spec.parameters,
+                )
+                for spec in mcp_tool_specs(include_hitl=gate is not None)
+            ]
+        )
+
+    server.add_request_handler("tools/list", mcp_types.PaginatedRequestParams, _list_tools)
 
     specs_by_name = {s.name: s for s in mcp_tool_specs(include_hitl=gate is not None)}
 
-    @server.call_tool()
-    async def _call_tool(name: str, arguments: dict) -> list[mcp_types.TextContent]:
+    async def _call_tool(ctx, req: mcp_types.CallToolRequestParams) -> mcp_types.CallToolResult:
+        name = req.name
+        arguments = req.arguments or {}
         spec = specs_by_name.get(name)
         if spec is None:
             raise ValueError(f"Unknown tool: {name}")
@@ -165,7 +169,9 @@ def build_mcp_app(
         if not result.ok:
             raise _ToolCallError(full_content)
 
-        return [mcp_types.TextContent(type="text", text=full_content)]
+        return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=full_content)])
+
+    server.add_request_handler("tools/call", mcp_types.CallToolRequestParams, _call_tool)
 
     session_manager = StreamableHTTPSessionManager(app=server, json_response=True, stateless=True)
 

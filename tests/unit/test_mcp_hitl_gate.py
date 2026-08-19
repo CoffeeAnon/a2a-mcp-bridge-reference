@@ -48,9 +48,9 @@ def test_begin_creates_consent_session_and_returns_url_elicitation():
 
     assert isinstance(params, mcp_types.ElicitRequestURLParams)
     assert params.mode == "url"
-    assert params.url.endswith(f"/consent/{params.elicitationId}")
+    assert params.url.endswith(f"/consent/{params.elicitation_id}")
     # A consent session exists for that id, carrying the exact action.
-    req = store.get(params.elicitationId)
+    req = store.get(params.elicitation_id)
     assert req is not None
     assert req.command == "delete-task"
     assert dict(req.args) == {"task_id": "t-42"}
@@ -81,7 +81,7 @@ def _approve(store, params, *, command, args, binding_message):
         binding_message=binding_message,
         user_secret=SECRET,
     )
-    assert store.submit_signed(params.elicitationId, signed)
+    assert store.submit_signed(params.elicitation_id, signed)
 
 
 def test_try_resume_mints_credential_after_approval():

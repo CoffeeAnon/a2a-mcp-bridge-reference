@@ -101,7 +101,7 @@ class McpHitlGate:
             mode="url",
             message=binding_message,
             url=f"{self._base_url}/consent/{sid}",
-            elicitationId=sid,
+            elicitation_id=sid,
         )
 
     def try_resume(
