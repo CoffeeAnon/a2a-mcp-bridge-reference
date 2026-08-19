@@ -34,26 +34,26 @@ dispatcher. This matches the component diagram in `docs/architecture.md`.
 """
 from __future__ import annotations
 
-import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 
 from bridge.core.client import ApiError
 from bridge.core.registry import REGISTRY
+from bridge.vault.durable_state import DurableReplayState
 from bridge.vault.interface import (
     CredentialDrift,
     CredentialExpired,
     CredentialReplay,
+    InMemorySingleUseRegistry,
     MalformedCredential,
     SignatureMismatch,
+    SingleUseRegistry,
     UnknownIssuer,
     WrongAudience,
     require_nonempty_secret,
 )
 from bridge.vault.oauth import _audience_matches, jwt_decode
-from bridge.vault.durable_state import DurableReplayState
-
 
 # ── RS-level outcomes ───────────────────────────────────────────────────────
 
@@ -100,7 +100,7 @@ class JwtResourceServer:
       - ``client``: the underlying tool client (e.g. an in-memory store
         in the reference; an HTTP client in production).
 
-    The RS maintains its own ``_consumed`` set keyed by ``jti``. This is
+    The RS maintains its own single-use record keyed by ``jti``. This is
     independent of the Vault's consumed set: a token marked consumed at
     the Vault is *not* automatically consumed at the RS, and vice versa.
 
@@ -135,9 +135,10 @@ class JwtResourceServer:
         self._expected_audience = expected_audience
         self._expected_rar_type = expected_rar_type
         self._client = client
-        self._consumed: set[str] = set()
-        self._durable_state = durable_state
-        self._lock = threading.Lock()
+        # One seam, chosen once. For a self-contained Tier-2 JWT this record
+        # is the RS's only single-use backstop, which makes it the load-bearing
+        # place to share when more than one RS replica is serving.
+        self._replay: SingleUseRegistry = durable_state or InMemorySingleUseRegistry()
 
     def execute(self, command: str, args: dict, credential: str) -> RsOutcome:
         """Validate the credential against the live request, then execute.
@@ -196,47 +197,29 @@ class JwtResourceServer:
             raise MalformedCredential("token has no authorization_details claim")
         ad = ad_list[0]
 
+        # Single-use is queried before the binding checks so a replayed token
+        # reports as a replay even when it also drifts. The query only selects
+        # the message; the claim at the end is the decision.
         jti = claims.get("jti", "")
-        if self._durable_state is not None:
-            # Durable consume: the shared store is the single-use authority, so
-            # a JWT consumed on RS-A is rejected on RS-B (and after a restart)
-            # even though ``_consumed`` is local. Order mirrors the in-memory
-            # path: single-use before binding.
-            if self._durable_state.is_jti_consumed(jti):
-                raise CredentialReplay(f"jti={jti} already consumed by RS")
-            if ad.get("command") != command:
-                raise CredentialDrift(
-                    f"token bound to command={ad.get('command')!r}, RS asked for {command!r}"
-                )
-            if ad.get("args") != args:
-                raise CredentialDrift(
-                    f"token bound to args={ad.get('args')!r}, RS asked for {args!r}"
-                )
-            if self._expected_rar_type is not None and ad.get("type") != self._expected_rar_type:
-                raise CredentialDrift(
-                    f"token rar_type={ad.get('type')!r} != RS expected {self._expected_rar_type!r}"
-                )
-            first = self._durable_state.claim_jti(jti, expired_at=float(int(claims.get("exp", 0))))
-            if not first:
-                raise CredentialReplay(f"jti={jti} already consumed by RS")
-            return jti
-        with self._lock:
-            if jti in self._consumed:
-                raise CredentialReplay(f"jti={jti} already consumed by RS")
-            if ad.get("command") != command:
-                raise CredentialDrift(
-                    f"token bound to command={ad.get('command')!r}, RS asked for {command!r}"
-                )
-            if ad.get("args") != args:
-                raise CredentialDrift(
-                    f"token bound to args={ad.get('args')!r}, RS asked for {args!r}"
-                )
-            if self._expected_rar_type is not None and ad.get("type") != self._expected_rar_type:
-                raise CredentialDrift(
-                    f"token rar_type={ad.get('type')!r} != RS expected {self._expected_rar_type!r}"
-                )
-            self._consumed.add(jti)
-            return jti
+        if self._replay.is_jti_consumed(jti):
+            raise CredentialReplay(f"jti={jti} already consumed by RS")
+
+        if ad.get("command") != command:
+            raise CredentialDrift(
+                f"token bound to command={ad.get('command')!r}, RS asked for {command!r}"
+            )
+        if ad.get("args") != args:
+            raise CredentialDrift(
+                f"token bound to args={ad.get('args')!r}, RS asked for {args!r}"
+            )
+        if self._expected_rar_type is not None and ad.get("type") != self._expected_rar_type:
+            raise CredentialDrift(
+                f"token rar_type={ad.get('type')!r} != RS expected {self._expected_rar_type!r}"
+            )
+
+        if not self._replay.claim_jti(jti, expired_at=float(int(claims.get("exp", 0)))):
+            raise CredentialReplay(f"jti={jti} already consumed by RS")
+        return jti
 
     # ── private executor ───────────────────────────────────────────────
 

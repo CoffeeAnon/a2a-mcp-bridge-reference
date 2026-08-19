@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from bridge.auth.hmac import CallerIdentity
-from bridge.tools import ToolSpec
 from bridge.core.dispatcher import (
     ApprovalRequired,
     CommandError,
@@ -19,6 +18,7 @@ from bridge.core.dispatcher import (
     Unauthorized,
 )
 from bridge.core.output import error_human, to_human
+from bridge.tools import ToolSpec
 
 
 @dataclass(frozen=True)

@@ -20,7 +20,6 @@ from bridge.vault.in_process import (
     sign_authorization_details,
 )
 
-
 USER_SECRET = "demo-user-signing-secret"
 
 

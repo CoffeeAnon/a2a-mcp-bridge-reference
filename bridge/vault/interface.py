@@ -24,9 +24,9 @@ breaks the property and the design contract.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Protocol
-
 
 MIN_SECRET_BYTES = 32
 """HMAC-SHA256 keys shorter than 32 bytes (256 bits) are below the
@@ -42,6 +42,90 @@ def require_nonempty_secret(name: str, value: str) -> None:
             f"{name} is too short ({len(value.encode())} bytes); "
             f"need at least {MIN_SECRET_BYTES} bytes of entropy"
         )
+
+
+class SingleUseRegistry(Protocol):
+    """Where "this has already been used" is recorded.
+
+    Single-use is the one guarantee in this design that is not a function of
+    the bytes in front of you. A signature either verifies or it does not, and
+    any process reaches the same verdict; "already spent" is a *memory*, and
+    the enforcement is exactly as wide as the storage holding it. Naming that
+    storage as a seam is what lets the same enforcement code span one process
+    or a whole cluster without branching on which it is.
+
+    Two implementations satisfy this:
+
+      - :class:`InMemorySingleUseRegistry` - process-local, the default. Correct
+        for a single process; a second replica has its own empty copy.
+      - ``bridge.vault.durable_state.DurableReplayState`` - a shared SQLite
+        file, so the record spans replicas and survives restart.
+
+    Callers must treat ``claim_*`` as the authority and never as advice. The
+    ``is_*_consumed`` queries exist only to choose an error message *before*
+    the binding checks run, so a replayed credential reports as a replay rather
+    than as drift; they are deliberately not the decision. Two callers can both
+    see ``is_*_consumed() == False`` and race, and exactly one will win the
+    subsequent ``claim_*``. A caller that branches on the query and skips the
+    claim has reintroduced the check-then-act hole this protocol exists to
+    close.
+
+    ``expired_at`` is the end of the window the record must block for: the
+    signed payload's ``exp`` for a signature, the credential's ``exp`` for a
+    jti. Implementations may keep records past it (the in-memory sets never
+    prune at all); they may never drop one before it.
+    """
+
+    def is_signature_consumed(self, sig_hash: str) -> bool: ...
+
+    def claim_signature(self, sig_hash: str, *, expired_at: float) -> bool:
+        """Record ``sig_hash`` as spent. True only for the first caller."""
+        ...
+
+    def is_jti_consumed(self, jti: str) -> bool: ...
+
+    def claim_jti(self, jti: str, *, expired_at: float) -> bool:
+        """Record ``jti`` as spent. True only for the first caller."""
+        ...
+
+
+class InMemorySingleUseRegistry:
+    """Process-local :class:`SingleUseRegistry`: two sets behind one lock.
+
+    The default for every Vault and resource server, and the whole of the
+    single-use guarantee when the deployment is one process. Records are never
+    pruned, which is what makes "once consumed, always a replay" true; the
+    consumers' expiry checks run before any claim, so a permanently-held key
+    can never reject a *valid* presentation (there is no valid presentation of
+    an expired key).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._signatures: set[str] = set()
+        self._jtis: set[str] = set()
+
+    def is_signature_consumed(self, sig_hash: str) -> bool:
+        with self._lock:
+            return sig_hash in self._signatures
+
+    def claim_signature(self, sig_hash: str, *, expired_at: float) -> bool:
+        with self._lock:
+            if sig_hash in self._signatures:
+                return False
+            self._signatures.add(sig_hash)
+            return True
+
+    def is_jti_consumed(self, jti: str) -> bool:
+        with self._lock:
+            return jti in self._jtis
+
+    def claim_jti(self, jti: str, *, expired_at: float) -> bool:
+        with self._lock:
+            if jti in self._jtis:
+                return False
+            self._jtis.add(jti)
+            return True
 
 
 class VaultError(Exception):

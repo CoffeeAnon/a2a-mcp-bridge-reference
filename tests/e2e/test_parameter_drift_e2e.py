@@ -15,7 +15,6 @@ from bridge.core.client import InMemoryTaskStore
 from bridge.core.dispatcher import ApprovalRequired, CommandSuccess, Dispatcher
 from bridge.vault import InProcessVault, sign_authorization_details
 
-
 USER_SECRET = "test-user-secret-32bytes-minimum-pad"
 RAR_TYPE = "tasktracker_task_action"
 

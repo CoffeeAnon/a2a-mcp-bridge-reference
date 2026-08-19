@@ -20,6 +20,7 @@ import pytest
 pytest.importorskip("mcp")
 
 import contextlib
+
 import anyio  # noqa: E402
 from mcp import types as mcp_types  # noqa: E402
 from mcp.client.session import ClientSession  # noqa: E402
@@ -27,6 +28,7 @@ from mcp.shared.exceptions import MCPError as McpError  # noqa: E402
 from mcp.shared.memory import create_client_server_memory_streams  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
+import bridge.commands  # noqa: F401, E402  (register commands before dispatch)
 from bridge.audit import AuditSink  # noqa: E402
 from bridge.auth.hmac import TokenStore  # noqa: E402
 from bridge.consent.url_mode import ConsentStore, build_consent_app  # noqa: E402
@@ -35,9 +37,6 @@ from bridge.core.dispatcher import Dispatcher  # noqa: E402
 from bridge.mcp.invoker import InProcessInvoker  # noqa: E402
 from bridge.mcp.server import build_mcp_app  # noqa: E402
 from bridge.vault import InProcessVault  # noqa: E402
-
-import bridge.commands  # noqa: F401, E402  (register commands before dispatch)
-
 
 SECRET = "mcp-elicit-emission-secret-32bytes-pad"
 RAR_TYPE = "tasktracker_task_action"
@@ -55,6 +54,24 @@ async def connected_client(server):
                     yield client
                 finally:
                     tg.cancel_scope.cancel()
+
+
+def _elicitation_id(elicitation: dict) -> str:
+    """Read the elicitation's id, pinning the field name that crosses the wire.
+
+    This used to be ``el.get("elicitationId") or el.get("elicitation_id")``,
+    which accepted either spelling and so could not fail whichever the SDK
+    emitted. Writing it down turned out to matter: mcp 2.0 names the *Python
+    attribute* ``elicitation_id`` (the rename the migration had to make in
+    ``bridge/mcp/hitl.py``) but serialises it under the camelCase alias
+    ``elicitationId``. Those are two different contracts and the permissive
+    ``or`` blurred them into one.
+    """
+    assert "elicitation_id" not in elicitation, (
+        "the wire form is the camelCase alias elicitationId; snake_case "
+        "appearing in the JSON means the SDK's serialisation alias changed"
+    )
+    return elicitation["elicitationId"]
 
 
 def _world(tmp_path):
@@ -98,7 +115,7 @@ def test_hitl_tool_call_emits_url_mode_elicitation(tmp_path):
             assert len(elicitations) == 1
             el = elicitations[0]
             assert el["mode"] == "url"
-            sid = el.get("elicitationId") or el.get("elicitation_id")
+            sid = _elicitation_id(el)
             assert el["url"].endswith(f"/consent/{sid}")
             # The server created a pending consent session for that id.
             assert w["consent_store"].get(sid) is not None
@@ -121,7 +138,7 @@ def test_resume_after_approval_executes_the_approved_action(tmp_path):
             with pytest.raises(McpError) as exc:
                 await client.call_tool("delete_task", {"task_id": target_id})
             el = exc.value.data["elicitations"][0]
-            sid = el.get("elicitationId") or el.get("elicitation_id")
+            sid = _elicitation_id(el)
 
             # 2. Human visits the consent page and approves (demo signs server-side).
             assert consent.get(f"/consent/{sid}").status_code == 200
@@ -131,7 +148,7 @@ def test_resume_after_approval_executes_the_approved_action(tmp_path):
 
             # 3. Retry the same call → bridge resumes: mint + execute.
             result = await client.call_tool("delete_task", {"task_id": target_id})
-            assert (getattr(result, "is_error", None) or getattr(result, "isError", None)) is not True
+            assert result.is_error is not True
 
             # 4. The approved action ran; the bystander was untouched.
             remaining = {t["task_id"] for t in w["store"].list()}

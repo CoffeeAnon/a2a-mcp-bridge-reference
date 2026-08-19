@@ -21,7 +21,6 @@ from bridge.core.dispatcher import (
 )
 from bridge.vault import InProcessVault
 
-
 SECRET = "scope-enforcement-test-32bytes-pad"
 
 

@@ -9,8 +9,8 @@ from dataclasses import replace
 import pytest
 
 from bridge import tools as tools_module
-from bridge.tools import SPECS_BY_NAME, TOOL_SPECS, ToolSpec
 from bridge.mcp.tools import MCP_HITL_ALLOWLIST, MCP_V1_ALLOWLIST, mcp_tool_specs
+from bridge.tools import SPECS_BY_NAME, TOOL_SPECS, ToolSpec
 
 
 def test_allowlist_contains_only_read_tools():

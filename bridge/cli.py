@@ -31,6 +31,8 @@ import argparse
 import sys
 from collections.abc import Callable
 
+# Importing this package registers all task-tracker commands.
+import bridge.commands  # noqa: F401
 from bridge.core.client import InMemoryTaskStore
 from bridge.core.dispatcher import (
     ApprovalRequired,
@@ -48,10 +50,6 @@ from bridge.vault import (
     OAuthVault,
     sign_authorization_details,
 )
-
-# Importing this package registers all task-tracker commands.
-import bridge.commands  # noqa: F401
-
 
 # ── Output helpers ──────────────────────────────────────────────────────────
 

@@ -18,7 +18,6 @@ from bridge.translation import (
     mcp_elicitation_response_to_a2a_resume,
 )
 
-
 # ── Sample inputs ─────────────────────────────────────────────────────────
 
 

@@ -380,6 +380,7 @@ def test_durable_preserves_expanded_rartype_and_expiration_at_mint(tmp_path):
     # exp-bounds check — i.e. we prove the exp guard fires, not the HMAC guard.
     import hashlib
     import hmac as _hmac
+
     from bridge.vault.in_process import canonical_authorization_bytes
     from bridge.vault.interface import SignedAuthorizationDetails
 

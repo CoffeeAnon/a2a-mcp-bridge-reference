@@ -295,10 +295,10 @@ def _context_id_from_elicitation_id(elicitation_id: str) -> str:
     try:
         # urlsafe_b64decode requires padding; restore the stripped '='.
         provided = base64.urlsafe_b64decode(tag_b64 + "=" * (-len(tag_b64) % 4))
-    except Exception:
+    except Exception as exc:
         raise TranslationError(
             f"elicitation_id tag is not valid base64url: {tag_b64!r}"
-        )
+        ) from exc
     if not _hmac.compare_digest(expected, provided):
         raise TranslationError(
             "elicitation_id tag does not verify (forged or from a "

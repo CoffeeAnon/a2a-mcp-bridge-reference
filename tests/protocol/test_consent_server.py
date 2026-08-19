@@ -19,7 +19,6 @@ from starlette.testclient import TestClient  # noqa: E402
 
 from bridge.consent.url_mode import ConsentStore, build_consent_app  # noqa: E402
 
-
 USER_SECRET = "url-mode-test-user-secret-32bytes-pad"
 RAR_TYPE = "tasktracker_task_action"
 

@@ -174,7 +174,7 @@ class DurableReplayState:
             with self._lock:
                 self._conn.close()
 
-    def __enter__(self) -> "DurableReplayState":
+    def __enter__(self) -> DurableReplayState:
         return self
 
     def __exit__(self, *exc) -> None:

@@ -20,7 +20,6 @@ from bridge.vault import (
     sign_authorization_details,
 )
 
-
 USER_SECRET = "user-secret-32bytes-minimum-padding-x"
 MINT_SECRET = "mint-secret-32bytes-minimum-padding-x"
 RAR_TYPE = "tasktracker_task_action"
@@ -177,7 +176,9 @@ def test_tier2_attacker_without_user_secret_cannot_forge_a_new_signature(seeded_
         mint_secret=MINT_SECRET,
         expected_rar_type=RAR_TYPE,
     )
-    dispatcher = Dispatcher(client=client, vault=vault)
+    # No Dispatcher here on purpose: the refusal happens at the Vault, before
+    # anything reaches dispatch. Constructing one suggested this test covered
+    # the dispatch path, which it never did.
 
     # Step 1: human signs for promised_id and approves.
     human_signed = _signed("delete-task", {"task_id": promised_id})

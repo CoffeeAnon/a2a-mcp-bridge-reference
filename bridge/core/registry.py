@@ -6,6 +6,7 @@ name and instantiates it. There is no reflection or classpath scanning —
 just a dict populated at import time.
 """
 from abc import ABC, abstractmethod
+
 from bridge.core.client import BridgeClient
 
 REGISTRY: dict[str, type] = {}

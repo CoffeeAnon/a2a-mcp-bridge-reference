@@ -28,10 +28,11 @@ mcp = [
     "uvicorn>=0.30",
     "python-multipart>=0.0.9",   # required by Starlette's form parsing in bridge.consent.url_mode
 ]
-# Test runner.
+# Test runner + linter.
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
+    "ruff>=0.6",
 ]
 
 [tool.setuptools.packages.find]
@@ -41,3 +42,37 @@ include = ["bridge*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+# Deliberately a small, high-signal set rather than everything ruff offers.
+# The repo exists to be read, so a rule earns its place by catching something a
+# reader would be misled by: unparseable modules (E9), genuine mistakes (F),
+# unsorted imports (I), likely bugs (B), and outdated idioms (UP).
+#
+# ARG (unused arguments) was tried and removed. Every hit was a parameter the
+# code does not choose: `**kwargs` on the Command contract, `ctx` on an MCP
+# handler the SDK calls, the stub bodies of a Protocol. A rule whose findings
+# are all false positives trains you to skim the output, which costs more than
+# it catches.
+#
+# Why this file exists at all: bridge/walkthrough.py carried a SyntaxError
+# through two releases with a fully green suite, because nothing imported it.
+# `ruff check` reads every file whether or not a test does.
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+ignore = [
+    "B008",  # function call in default arg: not a pattern this codebase uses
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests import bridge.commands purely to trigger command registration, and
+# guard optional-dependency imports with importorskip before importing, which
+# necessarily puts imports after statements.
+"tests/*" = ["E402", "F401"]
+# The demo secrets are generated next to the comment explaining why they are
+# generated, which puts one import below module level deliberately.
+"bridge/cli.py" = ["E402"]
+"bridge/walkthrough.py" = ["E402"]

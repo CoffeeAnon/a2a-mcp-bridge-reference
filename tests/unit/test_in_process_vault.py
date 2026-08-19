@@ -20,7 +20,6 @@ from bridge.vault import (
     sign_authorization_details,
 )
 
-
 SECRET = "test-shared-secret-32bytes-minimum-pad"
 RAR_TYPE = "tasktracker_task_action"
 

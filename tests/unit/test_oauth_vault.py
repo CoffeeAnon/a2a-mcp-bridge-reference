@@ -24,7 +24,6 @@ from bridge.vault import (
     sign_authorization_details,
 )
 
-
 USER_SECRET = "user-side-signing-secret-32bytes-pad"
 MINT_SECRET = "vault-mint-secret-32bytes-padding-x"
 RAR_TYPE = "tasktracker_task_action"
@@ -171,6 +170,7 @@ def test_consume_rejects_alg_none_attack(vault):
     """Forge a JWT with ``alg=none`` and an empty signature. Algorithm-
     pinning must reject before any signature comparison happens."""
     import json
+
     from bridge.vault.oauth import _b64url
 
     header_b64 = _b64url(json.dumps({"alg": "none", "typ": "JWT"}).encode())
@@ -196,6 +196,7 @@ def test_consume_rejects_alg_rs256_attack(vault):
     key-confusion vulnerability when the Vault eventually swaps
     algorithms in a production deployment."""
     import json
+
     from bridge.vault.oauth import _b64url
 
     header_b64 = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
@@ -207,7 +208,8 @@ def test_consume_rejects_alg_rs256_attack(vault):
         }],
     }).encode())
     # Sign with our HS256 secret as if the attacker had key-confused us.
-    import hashlib as _h, hmac as _hmac
+    import hashlib as _h
+    import hmac as _hmac
     sig = _b64url(_hmac.new(MINT_SECRET.encode(), f"{header_b64}.{body_b64}".encode(), _h.sha256).digest())
     forged = f"{header_b64}.{body_b64}.{sig}"
 
@@ -224,6 +226,7 @@ def test_consume_rejects_malformed_jwt_body(vault):
     """
     import hashlib as _h
     import hmac as _hmac
+
     from bridge.vault.oauth import _b64url
 
     header_b64 = _b64url(b'{"alg":"HS256","typ":"JWT"}')

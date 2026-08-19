@@ -16,11 +16,10 @@ pytest.importorskip("mcp")
 
 from mcp import types as mcp_types  # noqa: E402
 
-from bridge.consent.url_mode import ConsentStore  # noqa: E402
 from bridge.consent.demo_signer import demo_sign_as_user  # noqa: E402
+from bridge.consent.url_mode import ConsentStore  # noqa: E402
 from bridge.mcp.hitl import McpHitlGate  # noqa: E402
 from bridge.vault import InProcessVault  # noqa: E402
-
 
 SECRET = "mcp-hitl-gate-secret-32bytes-minimum-x"
 RAR_TYPE = "tasktracker_task_action"

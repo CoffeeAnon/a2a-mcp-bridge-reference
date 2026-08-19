@@ -3,7 +3,6 @@ import pytest
 
 from bridge.auth.hmac import CallerIdentity, TokenStore, caller_from_token
 
-
 SECRET = "test-secret"
 
 

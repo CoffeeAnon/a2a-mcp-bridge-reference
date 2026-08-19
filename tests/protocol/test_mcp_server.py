@@ -22,6 +22,8 @@ pytest.importorskip("mcp")
 
 from starlette.testclient import TestClient  # noqa: E402
 
+# Ensure command registration before invoker dispatches.
+import bridge.commands  # noqa: F401, E402
 from bridge.audit import AuditSink  # noqa: E402
 from bridge.auth.hmac import TokenStore  # noqa: E402
 from bridge.core.client import InMemoryTaskStore  # noqa: E402
@@ -29,10 +31,6 @@ from bridge.core.dispatcher import Dispatcher  # noqa: E402
 from bridge.mcp.invoker import InProcessInvoker  # noqa: E402
 from bridge.mcp.server import build_mcp_app  # noqa: E402
 from bridge.vault import InProcessVault  # noqa: E402
-
-# Ensure command registration before invoker dispatches.
-import bridge.commands  # noqa: F401, E402
-
 
 SECRET = "mcp-server-test-secret-32bytes-minimum"
 

@@ -49,7 +49,6 @@ from bridge.vault import (  # noqa: E402
     SignedAuthorizationDetails,
 )
 
-
 USER_SECRET = "mcp-roundtrip-user-secret-32bytes-pad"
 MINT_SECRET = "mcp-roundtrip-mint-secret-32bytes-padxx"
 ISSUER = "https://vault.reference.invalid"

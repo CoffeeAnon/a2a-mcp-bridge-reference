@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from mcp import types as mcp_types
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from mcp.shared.exceptions import UrlElicitationRequiredError
+from mcp.shared.exceptions import MCPError, UrlElicitationRequiredError
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount
@@ -41,12 +41,112 @@ logger = logging.getLogger(__name__)
 _CURRENT_CALLER: ContextVar[CallerIdentity | None] = ContextVar("mcp_current_caller", default=None)
 
 
-class _ToolCallError(Exception):
-    """Raised by the tool handler when the underlying tool reports ok=False.
+# Two failure kinds, two wire shapes. MCP separates them deliberately and the
+# distinction is not cosmetic:
+#
+#   * The tool RAN and failed  -> a CallToolResult with is_error=True. It is a
+#     *result*, so the model receives the failure text as tool output and can
+#     reason about it (retry with different arguments, tell the user, give up).
+#   * The request was malformed -> a JSON-RPC error. The call never happened;
+#     there is nothing for the model to act on, and the client's transport
+#     layer is the right place to surface it.
+#
+# Getting this backwards is easy to miss because both "look like errors" in a
+# transcript. Under mcp 1.x the `@server.call_tool()` decorator papered over it
+# by catching every handler exception and converting it to an is_error result.
+# Registering handlers directly (mcp 2.0) removes that safety net: a raised
+# exception now becomes a JSON-RPC error, and on the modern 2026-07-28 envelope
+# `runner.modern_error_data()` additionally replaces any non-MCPError with a
+# bare "Internal server error", discarding the message. So the handler below
+# RETURNS tool failures and RAISES only genuine protocol faults.
 
-    The MCP SDK's lowlevel Server converts exceptions inside request handlers
-    into tool results with is_error=true.
+
+def _authenticated_mcp_asgi(session_manager, token_store: TokenStore, secret: str):
+    """ASGI callable: bearer-auth gate in front of the MCP session manager.
+
+    Authentication happens here rather than inside a tool handler because it is
+    a property of the connection, not of any one call: an unauthenticated
+    request must never reach the protocol layer at all. The verified identity
+    travels to the handlers through ``_CURRENT_CALLER``, reset in a ``finally``
+    so a caller can never leak into the next request on the same task.
     """
+    async def handle(scope, receive, send):
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        try:
+            caller = verify_bearer(headers.get("authorization", ""), token_store, secret)
+        except AuthError as exc:
+            logger.warning("mcp_auth_reject reason=%s remote=%s", exc.reason, scope.get("client"))
+            response = JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32001, "message": f"unauthorized: {exc.reason}"},
+                    "id": None,
+                },
+                status_code=401,
+            )
+            await response(scope, receive, send)
+            return
+
+        token = _CURRENT_CALLER.set(caller)
+        try:
+            await session_manager.handle_request(scope, receive, send)
+        finally:
+            _CURRENT_CALLER.reset(token)
+
+    return handle
+
+
+def _caller_labels(caller: CallerIdentity | None) -> tuple[str, str, str]:
+    """(actor, thread_id, caller_id) for an authenticated caller, or the
+    anonymous placeholders. One place, so the three strings cannot drift
+    apart into three different notions of "who is calling"."""
+    if caller is None:
+        return "mcp:unknown", "mcp:anon", "mcp:anon"
+    return f"mcp:{caller.display_name}", f"mcp:{caller.caller_id}", caller.caller_id
+
+
+def _resolve_hitl(result, gate, invoker, spec, arguments, caller):
+    """Resume an approval-required call, or pause it by raising.
+
+    Two outcomes and no third: either the human has already approved this exact
+    action at the consent surface, in which case we mint the credential and
+    re-dispatch, or they have not, in which case we raise
+    ``UrlElicitationRequiredError`` pointing at the consent surface and the
+    client retries after approving.
+
+    The raise is the one place in this handler where raising is right. It is an
+    ``MCPError`` subclass, so it survives the protocol's error mapping intact
+    and carries the elicitation payload the client needs; a plain exception here
+    would reach the client as "Internal server error" and the HITL loop would
+    simply never complete.
+    """
+    _, _, caller_id = _caller_labels(caller)
+    payload = result.approval_payload or {}
+    command, args = payload.get("command"), payload.get("args", {})
+
+    token = gate.try_resume(command=command, args=args, caller_id=caller_id)
+    if token is not None:
+        return invoker.invoke(spec, arguments, approval_token=token, caller=caller)
+
+    binding = _binding_message(command, args)
+    elicitation = gate.begin(
+        command=command, args=args, caller_id=caller_id, binding_message=binding,
+    )
+    raise UrlElicitationRequiredError([elicitation], message=binding)
+
+
+def _write_audit_row(audit: AuditSink, caller, tool_name: str, arguments: dict, result) -> None:
+    """One audit row per tool call, success or failure alike."""
+    actor, thread_id, _ = _caller_labels(caller)
+    audit.write(AuditRow(
+        thread_id=thread_id,
+        tenant_id="mcp",
+        kind="tool_call",
+        tool_name=tool_name,
+        tool_args=str(arguments)[:500],
+        result_snippet=(result.content or "")[:500],
+        actor=actor,
+    ))
 
 
 def _binding_message(command: str, args: dict) -> str:
@@ -124,78 +224,35 @@ def build_mcp_app(
     specs_by_name = {s.name: s for s in mcp_tool_specs(include_hitl=gate is not None)}
 
     async def _call_tool(ctx, req: mcp_types.CallToolRequestParams) -> mcp_types.CallToolResult:
-        name = req.name
         arguments = req.arguments or {}
-        spec = specs_by_name.get(name)
+        spec = specs_by_name.get(req.name)
         if spec is None:
-            raise ValueError(f"Unknown tool: {name}")
+            # Protocol fault: the client named a tool that tools/list never
+            # offered. MCPError carries its own ErrorData, so the code and the
+            # message survive on every transport and protocol era.
+            raise MCPError(
+                code=mcp_types.INVALID_PARAMS,
+                message=f"Unknown tool: {req.name}",
+            )
 
         caller = _CURRENT_CALLER.get()
-        actor = f"mcp:{caller.display_name}" if caller else "mcp:unknown"
-        thread_id = f"mcp:{caller.caller_id}" if caller else "mcp:anon"
-        caller_id = caller.caller_id if caller else "mcp:anon"
-
         result = invoker.invoke(spec, arguments, caller=caller)
-
-        # HITL via URL-mode elicitation (single-agent path). On an
-        # approval-required outcome: if the human has already approved this
-        # exact action at the consent surface, resume by minting the
-        # credential and re-dispatching with it; otherwise emit a URL-mode
-        # elicitation and let the client complete it out-of-band, then retry.
         if result.approval_required and gate is not None:
-            payload = result.approval_payload or {}
-            cmd, cmd_args = payload.get("command"), payload.get("args", {})
-            token = gate.try_resume(command=cmd, args=cmd_args, caller_id=caller_id)
-            if token is not None:
-                result = invoker.invoke(spec, arguments, approval_token=token, caller=caller)
-            else:
-                binding = _binding_message(cmd, cmd_args)
-                elicit = gate.begin(
-                    command=cmd, args=cmd_args, caller_id=caller_id, binding_message=binding,
-                )
-                raise UrlElicitationRequiredError([elicit], message=binding)
+            result = _resolve_hitl(result, gate, invoker, spec, arguments, caller)
 
-        full_content = result.content or ""
-        snippet = full_content[:500]
+        _write_audit_row(audit, caller, req.name, arguments, result)
 
-        audit.write(AuditRow(
-            thread_id=thread_id,
-            tenant_id="mcp",
-            kind="tool_call",
-            tool_name=name,
-            tool_args=str(arguments)[:500],
-            result_snippet=snippet,
-            actor=actor,
-        ))
-
-        if not result.ok:
-            raise _ToolCallError(full_content)
-
-        return mcp_types.CallToolResult(content=[mcp_types.TextContent(type="text", text=full_content)])
+        # The tool ran. Report success or failure as tool output so the
+        # caller's model can act on the message, rather than raising and
+        # turning a recoverable tool failure into a transport-level fault.
+        return mcp_types.CallToolResult(
+            content=[mcp_types.TextContent(type="text", text=result.content or "")],
+            is_error=not result.ok,
+        )
 
     server.add_request_handler("tools/call", mcp_types.CallToolRequestParams, _call_tool)
 
     session_manager = StreamableHTTPSessionManager(app=server, json_response=True, stateless=True)
-
-    async def _handle_mcp(scope, receive, send):
-        """ASGI callable: bearer-auth wrapper around the MCP session manager."""
-        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
-        auth_header = headers.get("authorization", "")
-        try:
-            caller = verify_bearer(auth_header, token_store, secret)
-        except AuthError as e:
-            logger.warning("mcp_auth_reject reason=%s remote=%s", e.reason, scope.get("client"))
-            response = JSONResponse(
-                {"jsonrpc": "2.0", "error": {"code": -32001, "message": f"unauthorized: {e.reason}"}, "id": None},
-                status_code=401,
-            )
-            await response(scope, receive, send)
-            return
-        token = _CURRENT_CALLER.set(caller)
-        try:
-            await session_manager.handle_request(scope, receive, send)
-        finally:
-            _CURRENT_CALLER.reset(token)
 
     @contextlib.asynccontextmanager
     async def _lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -203,7 +260,7 @@ def build_mcp_app(
             yield
 
     starlette = Starlette(
-        routes=[Mount("/mcp", app=_handle_mcp)],
+        routes=[Mount("/mcp", app=_authenticated_mcp_asgi(session_manager, token_store, secret))],
         lifespan=_lifespan,
     )
     return McpApp(starlette=starlette, server=server)

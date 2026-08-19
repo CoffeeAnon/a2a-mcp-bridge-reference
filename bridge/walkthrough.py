@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import sys
 
+import bridge.commands  # noqa: F401 (registers task-tracker commands)
 from bridge.core.client import InMemoryTaskStore
 from bridge.core.dispatcher import ApprovalRequired, CommandSuccess, Dispatcher
 from bridge.translation import (
@@ -34,9 +35,6 @@ from bridge.vault import (
     sign_authorization_details,
 )
 
-import bridge.commands  # noqa: F401 (registers task-tracker commands)
-
-
 _CYAN = "\033[36m"
 _GREEN = "\033[32m"
 _YELLOW = "\033[33m"
@@ -50,7 +48,7 @@ _RESET = "\033[0m"
 # without an external Vault. A real deployment loads secrets from the
 # environment, a secrets manager, or an HSM, and the user signing secret
 # lives client-side (WebAuthn / Passkey), never on the bridge.
-import secrets as _secrets   # noqa: E402
+import secrets as _secrets  # noqa: E402
 
 USER_SECRET = _secrets.token_urlsafe(32)
 MINT_SECRET = _secrets.token_urlsafe(32)
@@ -106,7 +104,7 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
 
     print(f"{_BOLD}A2A → Vault → RS walkthrough (Tier {tier}){_RESET}")
     print(f"{_DIM}A reference simulation of the sequence diagram in "
-          f"`docs/architecture.md` "A2A" flow.{_RESET}")
+          f"the 'A2A' flow of `docs/architecture.md`.{_RESET}")
 
     # Set up shared infrastructure.
     store = InMemoryTaskStore()
@@ -218,7 +216,7 @@ def walkthrough_a2a(*, tier: int, pause: bool) -> int:
           "reference's `demo_sign_as_user` stand-in. In production the user_signing_"
           "secret lives on the human's MCP host (WebAuthn-bound, hardware-backed) "
           "and the bridge process NEVER holds it. See "
-          "docs/architecture.md "Threat" model and the docstring on "
+          "the 'Threat model' section of docs/architecture.md and the docstring on "
           "`bridge.consent.demo_signer`.")
     _print_envelope("signed payload (sent back to bridge)", {
         "command": signed.command,

@@ -49,7 +49,6 @@ from bridge.rs import JwtResourceServer, RsError, RsRejected, RsSuccess
 from bridge.tools import SPECS_BY_CLI_NAME
 from bridge.vault import Vault, VaultError
 
-
 # ── Outcome types: the structured return from Dispatcher.execute() ──────────
 
 @dataclass(frozen=True)

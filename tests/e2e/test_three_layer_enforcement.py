@@ -18,11 +18,11 @@ import pytest
 from bridge.core.client import InMemoryTaskStore
 from bridge.core.dispatcher import ApprovalRequired, CommandSuccess, Dispatcher
 from bridge.rs import JwtResourceServer
+from bridge.rs.jwt_resource_server import RsRejected
 from bridge.vault import (
     OAuthVault,
     sign_authorization_details,
 )
-
 
 USER_SECRET = "test-user-secret-32bytes-minimum-pad"
 MINT_SECRET = "test-mint-secret-32bytes-minimum-pad"
@@ -205,10 +205,20 @@ def test_independence_vault_and_rs_consumed_state_are_separate(separated_setup):
     assert isinstance(replay, ApprovalRequired)
     assert replay.reason == "CredentialReplay"
 
-    # The Vault was never asked about this credential and has no record of consumption.
-    assert minted.jti not in vault._consumed
-    # The RS has the jti in its own state.
-    assert minted.jti in rs._consumed
+    # Assert the independence through the public contract rather than by
+    # reading each object's private set. Reaching into ``_consumed`` pinned a
+    # storage detail, so it broke when the two sets moved behind a shared
+    # SingleUseRegistry seam even though the behaviour it names was unchanged.
+    #
+    # The Vault was never asked about this credential, so it still regards the
+    # jti as unconsumed: asking it to consume the credential now succeeds.
+    reconsumed_at_vault = vault.consume(minted.credential, "delete-task", {"task_id": promised})
+    assert reconsumed_at_vault.jti == minted.jti
+
+    # The RS, which did consume it, rejects the same credential as a replay.
+    rejected = rs.execute("delete-task", {"task_id": promised}, credential=minted.credential)
+    assert isinstance(rejected, RsRejected)
+    assert rejected.reason == "CredentialReplay"
 
 
 # ── Layer 3 catches what Layer 1 + bridge tampering would miss ─────────────

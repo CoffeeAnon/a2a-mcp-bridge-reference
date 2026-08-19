@@ -20,4 +20,4 @@ the reference: each file declares one ``@command`` class implementing
 by setting ``hitl=True`` on the decorator and a matching ``rar_type``
 on the corresponding ``ToolSpec`` in ``bridge/tools.py``.
 """
-from bridge.commands import list_tasks, get_task, create_task, update_task, delete_task  # noqa: F401
+from bridge.commands import create_task, delete_task, get_task, list_tasks, update_task  # noqa: F401
