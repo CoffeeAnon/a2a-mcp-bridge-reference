@@ -28,6 +28,22 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
+MIN_SECRET_BYTES = 32
+"""HMAC-SHA256 keys shorter than 32 bytes (256 bits) are below the
+recommended strength for cryptographic operations."""
+
+
+def require_nonempty_secret(name: str, value: str) -> None:
+    """Validate that a secret string is non-empty and meets the minimum 32-byte entropy requirement."""
+    if not value:
+        raise ValueError(f"{name} must not be empty")
+    if len(value.encode()) < MIN_SECRET_BYTES:
+        raise ValueError(
+            f"{name} is too short ({len(value.encode())} bytes); "
+            f"need at least {MIN_SECRET_BYTES} bytes of entropy"
+        )
+
+
 class VaultError(Exception):
     """Raised on any verification failure inside the Vault.
 

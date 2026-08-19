@@ -55,6 +55,7 @@ from bridge.vault.interface import (
     UnknownIssuer,
     Vault,
     WrongAudience,
+    require_nonempty_secret,
 )
 from bridge.vault.in_process import canonical_authorization_bytes
 from bridge.vault.durable_state import DurableReplayState
@@ -102,14 +103,7 @@ def _audience_matches(claim_aud, expected: str) -> bool:
     return False
 
 
-def _require_nonempty_secret(name: str, value: str) -> None:
-    if not value:
-        raise ValueError(f"{name} must not be empty")
-    if len(value.encode()) < _MIN_SECRET_BYTES:
-        raise ValueError(
-            f"{name} is too short ({len(value.encode())} bytes); "
-            f"need at least {_MIN_SECRET_BYTES} bytes of entropy"
-        )
+_require_nonempty_secret = require_nonempty_secret
 
 
 # ── Minimal HS256 JWT primitives (stdlib only) ───────────────────────────────
@@ -255,7 +249,7 @@ class OAuthVault(Vault):
         audience: str = "bridge-resource-server",
         expected_rar_type: str | None = None,
         max_signed_payload_ttl_seconds: int = DEFAULT_MAX_SIGNED_PAYLOAD_TTL_SECONDS,
-        durable_state: "DurableReplayState | None" = None,
+        durable_state: DurableReplayState | None = None,
     ) -> None:
         # Guardrail: empty/short secrets are a misconfiguration that
         # silently accepts attacker-signed tokens. Reject at construction.

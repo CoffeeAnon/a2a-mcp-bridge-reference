@@ -49,6 +49,7 @@ from bridge.vault.interface import (
     SignatureMismatch,
     UnknownIssuer,
     WrongAudience,
+    require_nonempty_secret,
 )
 from bridge.vault.oauth import _audience_matches, jwt_decode
 from bridge.vault.durable_state import DurableReplayState
@@ -122,10 +123,9 @@ class JwtResourceServer:
         expected_audience: str,
         client: Any,
         expected_rar_type: str | None = None,
-        durable_state: "DurableReplayState | None" = None,
+        durable_state: DurableReplayState | None = None,
     ) -> None:
-        from bridge.vault.oauth import _require_nonempty_secret
-        _require_nonempty_secret("verification_secret", verification_secret)
+        require_nonempty_secret("verification_secret", verification_secret)
         if not expected_issuer:
             raise ValueError("JwtResourceServer requires a non-empty expected_issuer")
         if not expected_audience:

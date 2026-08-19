@@ -39,6 +39,7 @@ from bridge.vault.interface import (
     SignatureReplay,
     SignedAuthorizationDetails,
     Vault,
+    require_nonempty_secret,
 )
 from bridge.vault.durable_state import DurableReplayState
 
@@ -206,10 +207,9 @@ class InProcessVault(Vault):
         secret: str,
         expected_rar_type: str | None = None,
         max_signed_payload_ttl_seconds: int = _DEFAULT_MAX_SIGNED_PAYLOAD_TTL_SECONDS,
-        durable_state: "DurableReplayState | None" = None,
+        durable_state: DurableReplayState | None = None,
     ) -> None:
-        from bridge.vault.oauth import _require_nonempty_secret
-        _require_nonempty_secret("secret", secret)
+        require_nonempty_secret("secret", secret)
         if max_signed_payload_ttl_seconds <= 0:
             raise ValueError("max_signed_payload_ttl_seconds must be > 0")
         self._secret = secret

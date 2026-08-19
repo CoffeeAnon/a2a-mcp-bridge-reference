@@ -1,21 +1,21 @@
 """MCP server: build_mcp_app() returns a mountable Starlette sub-app.
 
 Uses mcp.server.lowlevel.Server with explicit Tool definitions so each
-ToolSpec's JSON Schema travels through verbatim — no signature inference.
+ToolSpec's JSON Schema travels through verbatim without signature inference.
 
-SDK version: mcp 1.27.0
+SDK version: mcp 2.0.0
 Import paths confirmed against that version:
   - mcp.server.lowlevel.Server
   - mcp.server.streamable_http_manager.StreamableHTTPSessionManager
-  - mcp.types (Tool, etc.)
+  - mcp.types (Tool, ListToolsResult, CallToolResult, etc.)
 """
 from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from dataclasses import dataclass
-from collections.abc import AsyncIterator
 
 from mcp import types as mcp_types
 from mcp.server.lowlevel import Server
@@ -26,11 +26,13 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount
 
 from bridge.audit import AuditRow, AuditSink
-from bridge.mcp.invoker import ToolInvoker
-from bridge.mcp.hitl import McpHitlGate
 from bridge.auth.hmac import CallerIdentity, TokenStore
+from bridge.consent.url_mode import ConsentStore
 from bridge.mcp.auth import AuthError, verify_bearer
+from bridge.mcp.hitl import McpHitlGate
+from bridge.mcp.invoker import ToolInvoker
 from bridge.mcp.tools import mcp_tool_specs
+from bridge.vault import Vault
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +44,8 @@ _CURRENT_CALLER: ContextVar[CallerIdentity | None] = ContextVar("mcp_current_cal
 class _ToolCallError(Exception):
     """Raised by the tool handler when the underlying tool reports ok=False.
 
-    The MCP SDK's lowlevel Server converts exceptions inside @call_tool() into
-    tool results with isError=true.
+    The MCP SDK's lowlevel Server converts exceptions inside request handlers
+    into tool results with is_error=true.
     """
 
 
@@ -74,8 +76,8 @@ def build_mcp_app(
     audit: AuditSink,
     token_store: TokenStore,
     secret: str,
-    consent_store=None,
-    vault=None,
+    consent_store: ConsentStore | None = None,
+    vault: Vault | None = None,
     rar_type: str = "tasktracker_task_action",
     bridge_base_url: str = "https://bridge.invalid",
 ) -> McpApp:
