@@ -38,6 +38,20 @@ A system that mediates destructive tool execution through human authorization mu
 
 In this reference implementation, constraints 1, 2, and 4 are enforced programmatically in code. Constraint 3 represents a deployment topology requirement: while the local demonstration hosts a consent endpoint in-process for self-contained testing, production deployments require hosting the consent interface within a distinct authorization server domain.
 
+### Why constraint 3 cannot be closed in code
+
+The bridge cannot enforce constraint 3, because the bridge is the entity the constraint constrains.
+
+The demo's URL-mode consent server (`bridge/consent/url_mode.py`) runs inside the bridge process so the reference stays self-contained. Two defences hold in that configuration. The `ProposedAction` is `frozen=True` with `args` wrapped in a `MappingProxyType`, so the rendered display and the signed bytes derive from one immutable record and cannot diverge by construction. The `binding_message` is itself part of the canonical bytes, so a render-versus-sign mismatch produces a signature the Vault rejects (`tests/e2e/test_three_layer_enforcement.py::test_vault_rejects_binding_message_swap`).
+
+Neither defence covers the production shape. With WebAuthn or Passkey signing at the user, the bridge ships JavaScript to the user's browser; that script computes the canonical bytes and passes them to `navigator.credentials.get(...)` as the challenge. A hostile bridge can render "Read email" in HTML while composing canonical bytes for "Delete database" and a `binding_message` that matches the bytes rather than the screen. The signer signs honestly, the signature verifies, and the credential mints. The user was deceived; the cryptography was not. Note the limit of the binding-message defence here: it records what was signed, so it establishes the deception **forensically after the fact** rather than preventing it.
+
+The architectural fix is to move the consent surface into a different trust domain from the bridge — an authorization-server-hosted consent page that parses and renders the raw `(command, args)` itself, independent of any markup the bridge supplies. The user's signer then signs what the authorization server displayed. This is the standard FAPI 2.0 deployment shape and the production form constraint 3 requires.
+
+The reference does not bundle a separate authorization-server process, because the mechanics it exists to teach do not depend on the separation: the demo's frozen `ProposedAction` enforces the same property a separate server would, inside one process. The production swap is a deployment-topology change, not a change to the Vault contract.
+
+### Why constraint 2 is different from 1 and 4
+
 Constraint 2 carries a second deployment condition that the other code-enforced constraints do not. Constraints 1 and 4 are decidable from the request alone, so any process reaches the same verdict. Constraint 2 depends on a record of a prior event, which is only as wide as the storage holding it. Its enforcement therefore spans a single process by default and spans a cluster only when the replay state is shared. "Storage Locality as a Security Boundary" below develops this.
 
 ---
@@ -105,6 +119,10 @@ Tier-2 configurations divide authorization and execution into three decoupled en
 - **Layer 1: Pre-Mint Verification (`OAuthVault.mint`)**: The authorization server validates the human Hash-based Message Authentication Code (HMAC) signature against the canonical authorization bytes. It enforces the maximum allowed time-to-live (`max_signed_payload_ttl_seconds`) and claims the payload hash to prevent mint-level replay. The scope of that claim is a deployment property, not a code property; see "Storage Locality as a Security Boundary" below.
 - **Layer 2: Structural Pass-Through (`Dispatcher._execute_via_rs`)**: The bridge forwards the minted token directly to the resource server without modification. This property is structural: the dispatcher does not possess credentials to alter token claims.
 - **Layer 3: Live Request Validation (`JwtResourceServer.execute`)**: The resource server independently decodes the token, checks signature validity, ensures the token has not been consumed (`jti` tracking), and validates that the `authorization_details` claim strictly matches the incoming command arguments.
+
+**The bridge sits in the data path of every authorization decision, and in the trust path of none of them.** That sentence is the architecture. Every byte of every approval passes through the bridge, and no guarantee in this document depends on the bridge behaving. Layer 1 will not mint without a signature the bridge cannot forge; Layer 3 will not execute against a request the token does not pin. A reader evaluating this design should test that claim first, because everything else follows from it.
+
+This is the Rich Authorization Requests (RAR) pattern — RFC 9396 per-action `authorization_details`, a per-action mint, and enforcement at the resource server — carried over from open-banking FAPI 2.0 deployments into agent authorization. FAPI 2.0 layers further mechanisms above it (mutual TLS, DPoP, Pushed Authorization Requests) that this reference does not implement; the RAR binding pattern is the part it draws on.
 
 ### Trust Boundary Asymmetry
 
@@ -178,6 +196,8 @@ Action Authorization (This Reference):
 | **Credential Lifecycle** | Standard OAuth session tokens held by agent | Ephemeral, single-use credentials bound to specific parameters |
 
 Because the two approaches address different layers of the security handshake, enterprise environments can deploy Besozzi's pattern to establish authenticated identity and this design's pattern to constrain high-risk actions.
+
+**OAuth 2.0 Token Exchange (RFC 8693) is likewise complementary rather than substitutable.** It propagates delegated authority from one principal to another, which is a real part of a multi-domain deployment, but it carries no interactive approval pause: there is no point in the exchange at which a human is shown a specific `(command, args)` and asked to sign it. Token exchange answers "may this principal act for that one?"; this design answers "did a named human approve this exact mutation?" A production deployment may well use both.
 
 ---
 
