@@ -38,6 +38,8 @@ A system that mediates destructive tool execution through human authorization mu
 
 In this reference implementation, constraints 1, 2, and 4 are enforced programmatically in code. Constraint 3 represents a deployment topology requirement: while the local demonstration hosts a consent endpoint in-process for self-contained testing, production deployments require hosting the consent interface within a distinct authorization server domain.
 
+Constraint 2 carries a second deployment condition that the other code-enforced constraints do not. Constraints 1 and 4 are decidable from the request alone, so any process reaches the same verdict. Constraint 2 depends on a record of a prior event, which is only as wide as the storage holding it. Its enforcement therefore spans a single process by default and spans a cluster only when the replay state is shared. "Storage Locality as a Security Boundary" below develops this.
+
 ---
 
 ## Execution Topologies: Single-Domain vs. Multi-Domain Transport
@@ -100,7 +102,7 @@ Tier-2 configurations divide authorization and execution into three decoupled en
 
 ### Layer Responsibilities
 
-- **Layer 1: Pre-Mint Verification (`OAuthVault.mint`)**: The authorization server validates the human Hash-based Message Authentication Code (HMAC) signature against the canonical authorization bytes. It enforces the maximum allowed time-to-live (`max_signed_payload_ttl_seconds`) and tracks consumed payload hashes to prevent mint-level replay.
+- **Layer 1: Pre-Mint Verification (`OAuthVault.mint`)**: The authorization server validates the human Hash-based Message Authentication Code (HMAC) signature against the canonical authorization bytes. It enforces the maximum allowed time-to-live (`max_signed_payload_ttl_seconds`) and claims the payload hash to prevent mint-level replay. The scope of that claim is a deployment property, not a code property; see "Storage Locality as a Security Boundary" below.
 - **Layer 2: Structural Pass-Through (`Dispatcher._execute_via_rs`)**: The bridge forwards the minted token directly to the resource server without modification. This property is structural: the dispatcher does not possess credentials to alter token claims.
 - **Layer 3: Live Request Validation (`JwtResourceServer.execute`)**: The resource server independently decodes the token, checks signature validity, ensures the token has not been consumed (`jti` tracking), and validates that the `authorization_details` claim strictly matches the incoming command arguments.
 
@@ -109,6 +111,29 @@ Tier-2 configurations divide authorization and execution into three decoupled en
 The three layers exhibit a critical structural asymmetry:
 * **Post-Mint Isolation**: Layers 2 and 3 operate independently. A software defect in the dispatcher cannot compromise the resource server's verification logic.
 * **Pre-Mint Trust Root**: Layer 1 serves as the sole trust root for human intent. Because the human HMAC signature is not embedded directly within downstream JWT claims, an authorization server defect that mints tokens without verifying the signature cannot be detected by the resource server. Layer 1 protects whether a credential should exist; Layers 2 and 3 protect how that credential is used.
+
+---
+
+## Storage Locality as a Security Boundary
+
+Three of the four invariant constraints are properties of bytes. A signature verifies or it does not. A minted credential's `authorization_details` claim matches the live request or it does not. A resource server evaluating either question reaches the same verdict as any other resource server, with no coordination, because the inputs fully determine the answer.
+
+Consent Atomicity is not of that kind. "This signed payload has already been exchanged for a credential" is not derivable from the payload. It is a record of a prior event, and the enforcement is only as wide as the process holding that record. In the default configuration each process holds its own, which yields two equivalent failures:
+
+1. **Horizontal scale.** Two replicas behind a load balancer each begin with an empty record set. A captured signed payload rejected by replica A is accepted by replica B, and one human approval produces two executions.
+2. **Restart.** One replica across two points in time is the same failure. A process restarted inside the signed-payload time-to-live has discarded the record and will mint again.
+
+The 2026-07-28 Model Context Protocol specification is what promotes this from a theoretical concern to the default one. Session-oriented transports pinned a client to a replica for the duration of an exchange, which made process-local state incidentally correct. Self-describing stateless requests remove that pinning: a retry is routed by the load balancer, so round-robin distribution across replicas is the ordinary deployment rather than an advanced one. The cryptographic delegation model is unchanged by the transport. Its enforcement scope is not.
+
+This failure mode produces no error and no anomalous log entry. Both replicas verify the human signature correctly, mint correctly, and execute correctly. The audit log records two well-formed, human-approved executions of an action the operator approved once. The absence of any signal is the reason the property belongs in the security architecture rather than in an operations runbook.
+
+`bridge/vault/durable_state.py` is the seam that closes it. A single SQLite file, shared by every Vault and resource server in the deployment, holds both claim tables, and the single-use decision is an atomic `INSERT OR IGNORE` adjudicated by the database rather than a check-then-set evaluated in Python. Three conditions bound the guarantee:
+
+- The file must reside on locking-backed shared storage. SQLite's write-ahead log depends on functioning POSIX locks; over a network share that does not provide them, concurrent replicas can each conclude they won the claim, reinstating the original defect.
+- Expired records are reclaimed only by an explicit `purge_expired()` call. Automatic eviction at the expiry boundary was rejected because clock skew between replicas could discard a record a lagging replica still requires.
+- The `durable_state` parameter defaults to `None`. A multi-replica deployment that omits it retains process-local enforcement, and nothing in the system reports the omission.
+
+The asymmetry between tiers follows from what each tier validates. Sharing state moves the Tier 1 **mint** decision across replicas. The Tier 1 **consume** decision remains process-local by design, because `InProcessVault` validates a credential against its own issuance record rather than against a self-contained token: a credential minted on one replica and presented to another is rejected as `SignatureMismatch` rather than as a replay. Both outcomes are rejections. Cross-replica consume enforcement is a Tier 2 property, delivered at the resource server, where the JWT is self-contained and the consumed-`jti` set is the only remaining single-use backstop.
 
 ---
 

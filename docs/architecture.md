@@ -69,6 +69,8 @@ Both `InProcessVault` (Tier 1) and `OAuthVault` (Tier 2) satisfy a single `Vault
 - **`mint(signed_authorization_details) → MintedCredential`**: verify the human signature, then mint a single-use, action-scoped credential bound to the approved arguments. Both implementations bound the signer's requested `exp` against a `max_signed_payload_ttl_seconds` policy (default 600s); an over-long signed payload is rejected as `PayloadDriftAtMint` rather than minted.
 - **`consume(credential, command, args) → MintedCredential`**: validate the credential against the live request at execution time. Mark consumed. Reject replays, drift, expiry, and signature mismatches with typed exceptions.
 
+Both constructors also take an optional `durable_state: DurableReplayState | None = None` (as does `JwtResourceServer`). It decides *where* the "already used" fact is recorded, not *what* mint and consume check: `None` keeps the process-local sets, and a shared instance moves both the consumed-signature and consumed-`jti` claims into a shared SQLite file. See "Storage locality" below.
+
 **Structural binding at the bridge.** Between elicitation emission and signing, the bridge holds the proposed action in a `ProposedAction` dataclass (`bridge.consent.url_mode`) that is `frozen=True` with `args` wrapped in `types.MappingProxyType` over a deep-copy. Re-assignment is blocked by the frozen dataclass, and in-place mutation is blocked by the read-only mapping. The "credential is bound to the parameters the human approved" property reduces to this immutability plus the canonical-bytes contract: there is no point in time between emission and signing at which the bridge can alter what the human is being asked to sign.
 
 The dispatcher calls `consume` (or, in the Tier-2 separated-RS shape, forwards the credential to the RS, which performs the equivalent validation independently). The bridge layer calls `mint` in response to an elicitation approval.
@@ -167,7 +169,28 @@ In the reference, the consent server's session-id is the carrier: `elicitation_i
 - **Base token**: long-lived per-session token issued at agent-client setup time, carrying minimum scope (e.g., `tasks.read`). Validated on every request.
 - **Per-action minted credential**: single-use, short-lived (5 min default), parameter-bound. Acquired through the Vault mint flow at the moment of approval. Validated on the dispatch / RS call.
 
-Restart caveat: the consumed-jti set in `OAuthVault` and `JwtResourceServer` is process-local. A bridge or RS restart inside the JWT TTL discards the record. Production deployments must back this with a durable TTL-aware store (sqlite, Redis). Tier 1 is structurally closed against this because `_issued` is also process-local - post-restart credentials fail at `SignatureMismatch`, not as replays.
+### Storage locality
+
+Everything else in the enforcement chain is a function of bytes: two processes given the same signature, the same JWT and the same live request reach the same verdict without consulting each other. Single-use is the one decision that is not. "Already used" is a *memory*, and by default each process keeps its own.
+
+That makes the location of the replay record a security boundary rather than a substrate detail. The same set of facts falls out of it in two directions:
+
+| | Record is process-local (default) | Record is shared (`durable_state`) |
+|---|---|---|
+| Second consume, same process | `CredentialReplay` | `CredentialReplay` |
+| Second consume, second replica | **executes** | `CredentialReplay` |
+| Re-mint after restart inside the signed-payload TTL | **mints again** | `SignatureReplay` |
+| Two replicas racing the same payload | **both may win** | exactly one wins (atomic `INSERT OR IGNORE`) |
+
+`bridge/vault/durable_state.py` supplies the shared record: one SQLite file (WAL, `timeout=30.0`), two tables, and a claim that is an atomic insert rather than a check-then-set, so the database rather than Python decides the race. `OAuthVault`, `InProcessVault` and `JwtResourceServer` each take it as an optional `durable_state=` kwarg; point every process in the deployment at the same file.
+
+Three operational constraints come with it, none of which the library can enforce for you:
+
+- The file must be on **locking-backed** shared storage. SQLite's WAL relies on working POSIX locks; over NFS or CIFS without them, two replicas can both believe they won, which is the failure the store exists to prevent, restored silently.
+- **`purge_expired()` is never called automatically.** Records block for their window and beyond, so the table grows monotonically until an operator prunes it. Automatic purge at `expired_at` was rejected deliberately: with clock skew between replicas it could drop a record a lagging replica still needs.
+- **The kwarg defaults to `None`.** A multi-replica deployment that does not pass it keeps the process-local sets and the hole, with nothing in the logs to say so.
+
+Tier 1's guarantee sits in a different place, and the asymmetry is intentional. Sharing state moves Tier 1's *mint* decision across replicas — one signed payload, one credential, whichever replica sees it. Its *consume* decision stays process-local, because `InProcessVault` validates a credential against its own `_issued` record rather than against a self-contained token: a Tier-1 credential minted on replica A and presented to replica B is rejected as `SignatureMismatch` ("not issued by this Vault"), not as a replay. Both are rejections. The cross-replica *consume* guarantee belongs to Tier 2, where the JWT is self-contained and the RS holds the shared consumed-`jti` state — which is also why that set is the RS's only single-use backstop and the load-bearing place to share.
 
 ### Audit attribution
 
@@ -181,7 +204,7 @@ Every dispatch event writes an audit row (`bridge.audit.AuditSink`). The bundled
 | HITL approval timeout | Consent session expires; bridge sees no signed payload; resume with `approved=False`. |
 | Parameter mismatch at consume | `CredentialDrift` exception → `ApprovalRequired(reason="CredentialDrift")` from the dispatcher. The RS never executes the drifted action. |
 | Server restart during pause | Pending HITL gates are not persisted; an attempted resume returns `SignatureMismatch` (Tier 1) or fails at the RS's empty consumed set (Tier 2). |
-| Token re-use | Per-action credentials are single-use; second consume attempt → `CredentialReplay`. **Caveat:** within the signed-payload TTL, a captured signed payload can produce *multiple* distinct credentials for the *same* `(command, args)`. Reference enforces "fresh consent per action shape", not "fresh consent per execution"; the RS must add per-action idempotency for actions where double-execution is consequential. |
+| Token re-use | Per-action credentials are single-use; second consume attempt → `CredentialReplay`. A captured *signed payload* is equally single-use: a second presentation at mint raises `SignatureReplay`, so the contract is "fresh consent per execution", not "fresh consent per action shape". **Scope of that guarantee:** it holds within a process by default, and across replicas and restarts only when the Vaults and RS share a `DurableReplayState` (see "Storage locality"). |
 
 ## Threat model
 
@@ -190,7 +213,7 @@ Every dispatch event writes an audit row (`bridge.audit.AuditSink`). The bundled
 | **Prompt-injected agent** attempts destructive action. | The agent holds no `tasks.delete` credential. A delete attempt produces an `auth_required` event that the human must approve via their MCP host. The injected instruction cannot bypass the human-consent step because the consent step is what *creates* the credential. |
 | **Compromised agent process.** | In production-shape: agent holds only the read-scoped `t-base`. Per-action tokens exist only between Vault mint and RS consumption. **In the reference's HS256 demo**, both `user_signing_secret` and `mint_secret` are co-located in the agent process for self-containedness; an attacker has both, and only the "fresh-consent-per-action-shape" property remains as a barrier. Production Tier-2 must move signing client-side (WebAuthn/Passkey). |
 | **Parameter drift after approval.** | Three independent layers reject (`tests/e2e/test_three_layer_enforcement.py`): (1) bridge signs over the *emitted* `authorization_details`, held in a frozen `ProposedAction` with `MappingProxyType` args (structural; re-assignment and in-place mutation both blocked between emission and signing); (2) Vault refuses to mint if the HMAC doesn't verify; (3) RS validates the minted token's `authorization_details` against the live request. |
-| **Token replay across actions.** | Single-use at the RS via consumed-jti tracking. The token is also pinned to specific `authorization_details`, so capturing it gives no leverage outside the original action. **Carve-out:** single-use is enforced at *consume* (per-jti), not at *mint* (per-signed-payload). A captured signed payload can mint multiple credentials for the *same* `(command, args)` until the signed-payload TTL expires. Reference enforces "fresh consent per action shape", not "fresh consent per execution"; for actions where double-execution matters, the RS must add per-action idempotency or the Vault must track consumed signed-payload signatures at mint time. See "Failure modes" item "Token re-use" for the operational discussion. |
+| **Token replay across actions.** | Single-use at *both* ends: per-`jti` at consume (`CredentialReplay`) and per-signed-payload at mint (`SignatureReplay`), so a captured signed payload cannot be exchanged for a second credential within its TTL. The token is also pinned to specific `authorization_details`, so capturing it gives no leverage outside the original action. **Deployment condition:** both records are process-local unless a shared `DurableReplayState` is injected. Under a stateless transport with round-robin load balancing — the ordinary topology, not an edge case — a process-local record is not a guard: each replica starts empty, both executions are well-formed and human-approved, and nothing errors or logs. See "Storage locality" for the seam and its three operational constraints. |
 | **Bridge compromise.** | In production-shape: the bridge cannot mint tokens unilaterally - minting requires a verified human signature, and the user signing key is held by the human's MCP host. Bridge compromise allows re-mint within TTL for previously-approved actions but cannot fabricate signatures for *new* actions. **In the reference's demo configuration**, the bridge holds the user signing key via `bridge.consent.demo_signer`; a bridge compromise is equivalent to a human-key compromise. The demo signer module is the seam to replace. |
 | **Vault compromise.** | Out of scope - the Vault is the trust root. Standard Vault-hardening practices apply. |
 | **Human-side key compromise.** | Reduces to "attacker is the human." Mitigations are out-of-band: WebAuthn-bound keys (TPM / Secure Enclave), short-lived user-side signing keys. |
