@@ -215,17 +215,26 @@ class OAuthVault(Vault):
     does not let an attacker mint tokens directly: they can still
     forge user signatures, but only the Vault can produce a valid JWT.
 
-    **Restart-replay limitation.** The ``_consumed`` and
+    **Restart and cross-replica replay: closed by injection, open by
+    default.** With no ``durable_state``, the ``_consumed`` and
     ``_consumed_signatures`` sets are in-process memory. A bridge restart
     inside the 5-minute JWT TTL discards both records, so a
     captured-but-not-replayed JWT becomes replayable until its ``exp``
-    passes, and a captured signed payload becomes re-mintable. Production
-    deployments must swap both sets for a durable store (sqlite, Redis,
-    Postgres) with TTL-aware eviction. The reference does not do this
-    because (a) stdlib-only is a stated goal, and (b) the failure mode is
-    bounded by the 5-minute TTL. A ``JwtResourceServer`` deployed
-    separately has the same limitation in its own ``_consumed`` set -
-    durable jti tracking is a production substrate concern.
+    passes, and a captured signed payload becomes re-mintable. The same
+    holds *between* replicas: two processes each start with empty sets, so
+    a payload rejected on replica A is accepted on replica B. Under a
+    stateless HTTP transport with round-robin load balancing that is the
+    normal topology, not an edge case.
+
+    Passing a ``DurableReplayState`` (``durable_state=``) moves both
+    decisions to a shared SQLite file where the claim is an atomic
+    ``INSERT OR IGNORE``, closing the restart *and* cross-replica windows.
+    It stays optional and defaults to ``None`` so the in-memory path is
+    byte-identical to the pre-existing behaviour, and it remains
+    stdlib-only. The store must live on locking-backed shared storage;
+    ``purge_expired`` is the operator's to schedule. A
+    ``JwtResourceServer`` deployed separately takes the same kwarg and
+    should be pointed at the same file.
 
     **Mint-replay closure.** ``_consumed_signatures`` tracks
     canonical-bytes hashes of signed payloads accepted at ``mint``. A

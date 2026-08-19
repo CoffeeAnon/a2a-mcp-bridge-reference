@@ -103,11 +103,15 @@ class JwtResourceServer:
     independent of the Vault's consumed set: a token marked consumed at
     the Vault is *not* automatically consumed at the RS, and vice versa.
 
-    **Restart-replay limitation.** Like ``OAuthVault._consumed``, this
-    set is in-process memory. An RS restart inside the JWT TTL discards
-    the consumed record. Production deployments must back ``_consumed``
-    with a durable, TTL-aware store. The reference does not do this for
-    the same reasons documented on ``OAuthVault``.
+    **Restart and cross-replica replay.** With no ``durable_state``, this
+    set is in-process memory: an RS restart inside the JWT TTL discards
+    the consumed record, and a second RS replica never had it. Because a
+    Tier-2 JWT is self-contained, this set is the RS's *only* single-use
+    backstop, which makes it the load-bearing place to share state.
+    Passing a ``DurableReplayState`` (``durable_state=``, the same file
+    the Vault uses) makes the consumed-jti decision atomic and shared, so
+    a credential consumed on RS-A is rejected on RS-B and after a restart.
+    See ``bridge.vault.durable_state`` for the storage contract.
     """
 
     def __init__(

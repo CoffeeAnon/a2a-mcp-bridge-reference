@@ -164,8 +164,20 @@ def sign_authorization_details(
 
 class InProcessVault(Vault):
     """Tier 1 Vault. Thread-safe single-use enforcement via an in-memory
-    consumed-jti set. Production deployments would swap the set for a
-    durable store (sqlite, Redis) but the contract is identical.
+    consumed-jti set, or via a shared ``DurableReplayState`` when one is
+    passed as ``durable_state``; the contract is identical either way.
+
+    **Where Tier 1's cross-replica guarantee lives.** Sharing state moves
+    the *mint* decision across replicas: one signed payload exchanges for
+    one credential no matter which replica sees it. The *consume*
+    decision stays process-local by design, because Tier 1 verifies a
+    credential against its own ``_issued`` record rather than against a
+    self-contained token — so a credential minted on replica A and
+    presented to replica B fails as ``SignatureMismatch`` ("not issued by
+    this Vault"), not as a replay. That is a rejection either way. The
+    cross-replica *consume* guarantee belongs to Tier 2, where the JWT is
+    self-contained and the resource server holds the shared consumed-jti
+    state.
 
     **Restart-replay note.** Unlike Tier 2, Tier 1 holds the credential's
     *issuance* record (``_issued``) in the same process as ``_consumed``.
