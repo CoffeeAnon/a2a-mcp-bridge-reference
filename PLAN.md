@@ -1,5 +1,49 @@
 # PLAN — Durable shared replay state for the stateless A2A↔MCP bridge
 
+## STATUS (run 497 — completed)
+
+Item **#1 is done and committed** (`0ad6bf7`). What actually landed:
+
+- `bridge/vault/durable_state.py` — `DurableReplayState` (SQLite, WAL, atomic
+  `INSERT OR IGNORE` claim; `timeout=30.0` busy-wait for the cross-process
+  lock; read methods lock-guarded).
+- Wiring (additive `durable_state` kwarg) in `InProcessVault`, `OAuthVault`,
+  and `JwtResourceServer`. The in-memory branch is byte-identical when the
+  kwarg is `None`, so all 130 baseline tests are untouched and green.
+- `bridge/vault/__init__.py` re-exports `DurableReplayState`.
+- `tests/unit/test_durable_state.py` — 13 tests (all pass), including a
+  genuine two-OS-process cross-replica check (a real child `python` process
+  over the same file must not re-mint / re-consume a recorded approval).
+  Full suite: **143 passed, 3 failed, 4 errors** — the 7 failures are the
+  pre-existing mcp 1.27→2.0 SDK renames belonging to the untouched item #2;
+  no security-logic test fails.
+
+**Deviations from this plan** (recorded in detail in `SELF_REVIEW.md`):
+
+1. *`claim_jti`/`claim_signature` are permanent, not window-bounded.* The
+   plan's test 3 asserted "re-claim after `expired_at` → True" but the
+   implementation (correctly) uses `INSERT OR IGNORE`, so a record blocks
+   **forever** until `purge_expired` drops it. A jti is single-use by
+   definition; the consumer's exp-check runs *before* the claim, so an expired
+   credential is `CredentialExpired` before it reaches the guard — permanent
+   blocking is the safe direction and matches the in-memory baseline's
+   "once consumed, always a replay." The test now pins the real behavior
+   (re-claim only reopens via explicit `purge_expired`).
+2. *Tier-1 cross-replica consume is `SignatureMismatch`, not cross-replica
+   replay.* Tier 1's issuance record (`_issued`) is process-local and the
+   durable store deliberately does not duplicate it (a command/args/exp record
+   cannot be reconstructed from the signature table). So a Tier-1 credential
+   minted on replica A and consumed on replica B fails `SignatureMismatch` —
+   the same documented restart behavior. The **cross-replica *consume*
+   single-use guarantee is delivered at the Resource Server** (Tier-2 JWTs are
+   self-contained), which is tested. Tier-1's cross-replica guarantee is at
+   **mint** time (one signature = one credential), which is also tested.
+3. Items **#2 and #3 are untouched**, exactly as scoped: the mcp SDK here is
+   **2.0.0** (callback API; no `@server.list_tools()` decorators), so a
+   faithful 2026-07-28 stateless HTTP + MRTR migration needs `bridge/mcp/
+   server.py` and the two SDK-dependent test files rewritten. De-risked in
+   the "SDK findings" section below.
+
 ## Scope (this run)
 
 THE WORK on the card lists three substantial items. Per the coordinator's

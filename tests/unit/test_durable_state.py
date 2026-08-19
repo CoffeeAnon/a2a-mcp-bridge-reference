@@ -17,7 +17,11 @@ or reverts a surface to its local set), the test fails.
 """
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 
@@ -134,6 +138,67 @@ def test_two_connections_one_file_share_state(tmp_path):
     assert b.claim_jti("jti-A", expired_at=time.time() + 60) is False
     a.close()
     b.close()
+
+
+# ── 4b: genuine two-OS-process cross-replica (strongest boundary) ───────────
+#
+# The two-connection test above shares one process. A real deployment is two
+# OS processes (replicas) over one file on shared storage. This spawns a real
+# child `python` process that opens the same SQLite file and attempts to
+# re-mint the same signed payload / re-consume the same jti. If the shared
+# state wiring regresses, the child will succeed where it must fail.
+
+
+_CHILD_SCRIPT = r'''
+import os, sys, json
+from bridge.vault import DurableReplayState, OAuthVault
+from bridge.vault.interface import SignedAuthorizationDetails
+sd = SignedAuthorizationDetails(**json.loads(os.environ["DR_SIGNED"]))
+vault = OAuthVault(
+    user_signing_secret=os.environ["DR_USER_SECRET"],
+    mint_secret=os.environ["DR_MINT_SECRET"],
+    issuer="https://vault.reference.invalid", audience="bridge-resource-server",
+    durable_state=DurableReplayState(os.environ["DR_PATH"]),
+)
+try:
+    minted = vault.mint(sd)
+    # If the mint succeeded (a second credential from the same signature),
+    # also consume it — proving the whole approval executed a second time.
+    vault.consume(minted.credential, sd.command, sd.args)
+    print(json.dumps({"second_execution": True, "minted": True}))
+except Exception as e:  # noqa: BLE001 — the child reports what happened
+    print(json.dumps({"second_execution": False, "error": type(e).__name__}))
+'''
+
+
+def test_true_cross_process_replica_cannot_reexecute(tmp_path):
+    path = str(tmp_path / "xproc.db")
+    # Parent = replica A: mint + consume the one approval, recording it.
+    parent = OAuthVault(
+        user_signing_secret=USER_SECRET, mint_secret=MINT_SECRET,
+        issuer=ISSUER, audience=AUDIENCE, durable_state=DurableReplayState(path),
+    )
+    signed = _oauth_signed()
+    cred = parent.mint(signed)
+    parent.consume(cred.credential, "delete-task", {"task_id": "t-42"})
+
+    # Child = replica B (a separate OS process): tries the SAME approval.
+    env = {
+        **os.environ,
+        "DR_PATH": path,
+        "DR_USER_SECRET": USER_SECRET,
+        "DR_MINT_SECRET": MINT_SECRET,
+        "DR_SIGNED": json.dumps(signed.__dict__),
+    }
+    proc = subprocess.run(
+        [sys.executable, "-c", _CHILD_SCRIPT],
+        capture_output=True, text=True, cwd=os.getcwd(), env=env, timeout=60,
+    )
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    # The second execution MUST NOT happen on a different process.
+    assert out["second_execution"] is False, out
+    assert out["error"] == "SignatureReplay", out
+    assert proc.returncode == 0, proc.stderr
 
 
 # ── 5: cross-replica signature replay (the card's #1 known trap) ────────────
